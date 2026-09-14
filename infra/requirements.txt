@@ -1,0 +1,5 @@
+pandas
+requests
+python-dateutil
+azure-storage-blob
+azure-identity

@@ -1,0 +1,112 @@
+name: Deploy STC Pipeline to Azure
+
+# Runs on GitHub's own hosted runners - not your laptop - so the Conditional
+# Access "Device state: Unregistered" block that's stopping `az login` on
+# your machine doesn't apply here at all. This authenticates as an
+# application (a Service Principal via OIDC federated credential), not as
+# admin_tc signing in interactively, so there's no device to be unregistered.
+#
+# Prerequisite (someone with existing Entra admin rights needs to do this
+# once - it cannot be done from a blocked account):
+#   1. Create an App Registration in Entra ID.
+#   2. Add a federated credential on it, trusting this GitHub repo + branch
+#      (Entra ID > App registrations > <app> > Certificates & secrets >
+#      Federated credentials > "GitHub Actions deploying Azure resources").
+#      No client secret is created or stored anywhere - that's the point.
+#   3. Grant that App Registration's service principal "Contributor" on
+#      rg-stc-prd-uks-001 (or the subscription, if the RG doesn't exist yet).
+#   4. Add three repo secrets (Settings > Secrets and variables > Actions):
+#        AZURE_CLIENT_ID       - the App Registration's Application (client) ID
+#        AZURE_TENANT_ID       - your Entra tenant ID
+#        AZURE_SUBSCRIPTION_ID - the target subscription ID
+#   5. Add one repo secret for the actual pipeline secret:
+#        SAFETYCULTURE_API_KEY
+
+on:
+  workflow_dispatch: # manual "Run workflow" button - use this for the first few runs
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'Scripts/**'
+
+permissions:
+  id-token: write   # required for OIDC federated credential auth
+  contents: read
+
+env:
+  RESOURCE_GROUP: rg-stc-prd-uks-001
+  LOCATION: uksouth
+  ACR_NAME: acrocustcprd001   # update once the real (approved) name is confirmed
+  IMAGE_NAME: stc-pipeline
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    outputs:
+      acr_login_server: ${{ steps.deploy.outputs.acr_login_server }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC - no secret, no device, no laptop involved)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group exists
+        run: |
+          az group create --name "$RESOURCE_GROUP" --location "$LOCATION"
+
+      - name: Compile-check the Bicep
+        run: az bicep build --file infra/main.bicep
+
+      - name: Deploy infrastructure
+        id: deploy
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.bicepparam \
+            --parameters safetyCultureApiKey="${{ secrets.SAFETYCULTURE_API_KEY }}" \
+            --parameters containerImage="$ACR_NAME.azurecr.io/$IMAGE_NAME:latest"
+
+  build-and-push-image:
+    needs: deploy-infra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build image in ACR (no local Docker needed here either)
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_NAME:latest" \
+            --file infra/Dockerfile \
+            .
+
+  test-run:
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' # only on manual trigger, not every push
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fire the Container App Job once, manually
+        run: |
+          az containerapp job start \
+            --name caj-stc-prd-uks-001 \
+            --resource-group "$RESOURCE_GROUP"

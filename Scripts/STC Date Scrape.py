@@ -1,10 +1,15 @@
 import os
-import glob
+import sys
 import pandas as pd
 from dateutil.parser import parse
 
-# Target directory containing the tables
-TARGET_DIR = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\SLV"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
+
+# Data lake folder to process in-place (was a local OneDrive path)
+TARGET_DIR = "SLV"
+
+_adls = azure_io.get_client()
 
 # Prefix / Suffix patterns to exclude from transformation
 EXCLUDE_PATTERNS = ('detail_', 'result_', '_ingested', 'question_')
@@ -59,20 +64,18 @@ def is_datetime_column(series):
 
 def process_file(file_path):
     print(f"\n==========================================")
-    print(f"  ENGAGING: {os.path.basename(file_path)}")
+    print(f"  ENGAGING: {file_path}")
     print(f"==========================================")
     
-    ext = os.path.splitext(file_path)[1].lower()
+    # Only CSV is handled - the local version also supported .xlsx/.parquet,
+    # but this pipeline only ever produces CSVs, and azure_io doesn't (yet)
+    # support the other formats. list_files() in main() already only looks
+    # for .csv, so this branch is just a safety net.
+    if not file_path.endswith('.csv'):
+        return
     
     try:
-        if ext == '.csv':
-            df = pd.read_csv(file_path, low_memory=False)
-        elif ext in ['.xlsx', '.xls']:
-            df = pd.read_excel(file_path)
-        elif ext == '.parquet':
-            df = pd.read_parquet(file_path)
-        else:
-            return
+        df = _adls.read_csv(file_path, low_memory=False)
     except Exception as e:
         print(f"  [!] Failed to read file: {e}")
         return
@@ -110,30 +113,18 @@ def process_file(file_path):
 
     if modified:
         try:
-            if ext == '.csv':
-                df.to_csv(file_path, index=False)
-            elif ext in ['.xlsx', '.xls']:
-                df.to_excel(file_path, index=False)
-            elif ext == '.parquet':
-                df.to_parquet(file_path, index=False)
-            print(f"  [✓] Successfully transformed and saved: {os.path.basename(file_path)}")
+            _adls.write_csv(df, file_path, index=False)
+            print(f"  [✓] Successfully transformed and saved: {file_path}")
         except Exception as e:
             print(f"  [!] Failed to save modified file: {e}")
     else:
         print("  No columns required splitting in this table.")
 
 def main():
-    if not os.path.exists(TARGET_DIR):
-        print(f"Error: Path '{TARGET_DIR}' does not exist.")
-        return
-
-    extensions = ['*.csv', '*.xlsx', '*.xls', '*.parquet']
-    files = []
-    for ext in extensions:
-        files.extend(glob.glob(os.path.join(TARGET_DIR, ext)))
+    files = _adls.list_files(TARGET_DIR, suffix=".csv")
 
     if not files:
-        print("No table files (.csv, .xlsx, .parquet) found in the directory.")
+        print("No table files (.csv) found in the SLV folder.")
         return
 
     print(f"Found {len(files)} table(s) to process...")

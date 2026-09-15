@@ -7,11 +7,15 @@ Reads from BNZ folder, cleans/standardizes data, outputs to SLV folder
 """
 
 import os
+import sys
 import pandas as pd
 import re
 import warnings
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # Suppress pandas DtypeWarnings
 warnings.filterwarnings('ignore', category=pd.errors.DtypeWarning)
@@ -20,14 +24,11 @@ warnings.filterwarnings('ignore', category=pd.errors.DtypeWarning)
 # CONFIGURATION
 # ============================================================================
 
-# Input folder (where flattened BNZ CSVs are)
-BNZ_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\BNZ"
+# Data lake folder names (was a local OneDrive path)
+BNZ_INPUT_PATH = "BNZ"
+SLV_OUTPUT_PATH = "SLV"
 
-# Output folder (where cleaned/standardized data goes)
-SLV_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\SLV"
-
-# Create output folder if it doesn't exist
-os.makedirs(SLV_OUTPUT_PATH, exist_ok=True)
+_adls = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -271,19 +272,19 @@ def process_table(source_name: str, target_name: str, test_run: bool = False) ->
     Process a single table: read from BNZ, clean, deduplicate, save to SLV.
     Returns: (rows_processed, rows_failed)
     """
-    input_file = os.path.join(BNZ_INPUT_PATH, f"{source_name}.csv")
-    output_file = os.path.join(SLV_OUTPUT_PATH, f"{target_name}.csv")
+    input_file = f"{BNZ_INPUT_PATH}/{source_name}.csv"
+    output_file = f"{SLV_OUTPUT_PATH}/{target_name}.csv"
     
     print(f"\n📋 Processing: {source_name} -> {target_name}")
     
     # Check if input file exists
-    if not os.path.exists(input_file):
+    if not _adls.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0
     
     try:
         # Read the CSV - read all as string to avoid DtypeWarnings
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = _adls.read_csv(input_file, dtype=str, low_memory=False)
         
         if df.empty:
             print(f"   ⚠️ No data in {source_name}")
@@ -348,7 +349,7 @@ def process_table(source_name: str, target_name: str, test_run: bool = False) ->
             print(f"   ℹ️ Deduplication disabled for {source_name} (via DEDUPE_TOGGLES)")
         
         # Save to SLV
-        df_deduped.to_csv(output_file, index=False, encoding='utf-8')
+        _adls.write_csv(df_deduped, output_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved {deduped_count} rows to SLV")
         
         return deduped_count, 0

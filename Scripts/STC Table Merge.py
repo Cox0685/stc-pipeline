@@ -7,23 +7,24 @@ Reads from SLV folder, transforms/merges data, outputs to GLD folder
 """
 
 import os
+import sys
 import pandas as pd
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# Input folder (where SLV CSVs are)
-SLV_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\SLV"
+# Data lake folder names (was a local OneDrive path)
+SLV_INPUT_PATH = "SLV"
+GLD_OUTPUT_PATH = "GLD"
 
-# Output folder (where GLD transformed data goes)
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-
-# Create output folder if it doesn't exist
-os.makedirs(GLD_OUTPUT_PATH, exist_ok=True)
+_adls = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -238,35 +239,25 @@ print("=" * 80)
 
 def write_large_dataframe(df: pd.DataFrame, output_file: str, chunk_size: int = 1000):
     """
-    Write a large DataFrame to CSV in chunks to avoid MemoryError.
-    Preserves all columns exactly as they are.
+    Write a DataFrame to the data lake.
+
+    The original local-disk version chunked this write (mode='a' per chunk)
+    specifically to avoid a MemoryError building one giant local file
+    write - azure_io.write_csv() uploads the whole thing as one blob in a
+    single call, since the DataFrame is already fully in memory by this
+    point regardless of how the write itself is chunked. This is simpler
+    and was fine in testing; if a genuinely huge table ever causes memory
+    pressure building the CSV string, that's the thing to revisit, not the
+    chunking of the HTTP upload itself.
     """
     total_rows = len(df)
     total_cols = len(df.columns)
-    print(f"   💾 Writing {total_rows} rows with {total_cols} columns in chunks of {chunk_size}...")
-    
-    # Write header once
-    header_written = False
-    
-    for i in range(0, total_rows, chunk_size):
-        chunk = df.iloc[i:i+chunk_size]
-        mode = 'a' if header_written else 'w'
-        header = not header_written
-        
-        chunk.to_csv(
-            output_file, 
-            mode=mode, 
-            header=header, 
-            index=False, 
-            encoding='utf-8'
-        )
-        header_written = True
-        
-        # Show progress periodically
-        if (i + chunk_size) % 5000 == 0 or i == 0:
-            written_so_far = min(i + chunk_size, total_rows)
-            print(f"      📦 Written {written_so_far:,} / {total_rows:,} rows")
-    
+    print(f"   💾 Writing {total_rows} rows with {total_cols} columns...")
+
+    _adls.write_csv(df, output_file, index=False, encoding='utf-8')
+
+    print(f"   ✅ Written {total_rows:,} rows")
+
     print(f"   ✅ Complete: {total_rows:,} rows written to {output_file}")
 
 
@@ -366,11 +357,11 @@ def execute_transformations(config: Dict, toggles: Dict, test_run: bool = False)
             print(f"   ⏭️ Skipping {table_name} (disabled in TABLE_TOGGLES)")
             continue
             
-        input_file = os.path.join(SLV_INPUT_PATH, f"{table_name}.csv")
+        input_file = f"{SLV_INPUT_PATH}/{table_name}.csv"
         try:
-            if os.path.exists(input_file):
+            if _adls.exists(input_file):
                 # Suppress mixed type warnings by reading all as string
-                df = pd.read_csv(input_file, dtype=str, low_memory=False)
+                df = _adls.read_csv(input_file, dtype=str, low_memory=False)
                 if test_run and not df.empty:
                     df = df.head(10)
                 all_dfs[table_name] = df
@@ -450,15 +441,17 @@ def execute_transformations(config: Dict, toggles: Dict, test_run: bool = False)
         
         print(f"   -> Final columns: {len(df.columns)} (ALL preserved)")
         
-        # Step C: Save to GLD folder with chunked writing for large dataframes
-        output_file = os.path.join(GLD_OUTPUT_PATH, f"{target_table_name}.csv")
+        # Step C: Save to GLD folder (chunk threshold kept for logging parity;
+        # write_large_dataframe now writes in one call either way - see its
+        # docstring for why)
+        output_file = f"{GLD_OUTPUT_PATH}/{target_table_name}.csv"
         
         # Use chunked writing if dataframe has many columns or rows
         # This prevents MemoryError when saving large/wide dataframes
         if len(df.columns) > 500 or len(df) > 100000:
             write_large_dataframe(df, output_file, chunk_size=1000)
         else:
-            df.to_csv(output_file, index=False, encoding='utf-8')
+            _adls.write_csv(df, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved {target_table_name} ({len(df)} rows, {len(df.columns)} columns)")
         
         transformed_results[target_table_name] = df
@@ -486,14 +479,13 @@ def main():
     print("-" * 70)
     
     for table_name in transformed_tables.keys():
-        output_file = os.path.join(GLD_OUTPUT_PATH, f"{table_name}.csv")
-        if os.path.exists(output_file):
-            size = os.path.getsize(output_file)
+        output_file = f"{GLD_OUTPUT_PATH}/{table_name}.csv"
+        if _adls.exists(output_file):
             try:
-                df = pd.read_csv(output_file)
-                print(f"   {table_name:<35} | {len(df):>6} rows | {len(df.columns):>3} cols | {size:>10,} bytes")
+                df = _adls.read_csv(output_file)
+                print(f"   {table_name:<35} | {len(df):>6} rows | {len(df.columns):>3} cols")
             except:
-                print(f"   {table_name:<35} | {size:>10,} bytes")
+                print(f"   {table_name:<35} | (exists, could not read for summary)")
         else:
             print(f"   {table_name:<35} | NOT CREATED")
     
@@ -508,10 +500,10 @@ def main():
             print(f"   ❌ {table_name:<30} | DROPPED")
         else:
             target = config.get("target_table", f"gld_{table_name}")
-            output_file = os.path.join(GLD_OUTPUT_PATH, f"{target}.csv")
-            if os.path.exists(output_file):
+            output_file = f"{GLD_OUTPUT_PATH}/{target}.csv"
+            if _adls.exists(output_file):
                 try:
-                    df = pd.read_csv(output_file)
+                    df = _adls.read_csv(output_file)
                     print(f"   ✅ {table_name:<30} | KEPT -> {target} ({len(df.columns)} columns)")
                 except:
                     print(f"   ✅ {table_name:<30} | KEPT -> {target}")

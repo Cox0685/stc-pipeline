@@ -15,6 +15,9 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
+
 # Increase recursion limit for deeply nested JSON
 sys.setrecursionlimit(10000)
 
@@ -22,14 +25,12 @@ sys.setrecursionlimit(10000)
 # CONFIGURATION
 # ============================================================================
 
-# Input folder (where the 3-column CSVs are)
-TNS_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\TNS"
+# Data lake folder names (was a local OneDrive path) - both live inside the
+# same ADLS Gen2 filesystem, ADLS_FILESYSTEM env var
+TNS_INPUT_PATH = "TNS"
+BNZ_OUTPUT_PATH = "BNZ"
 
-# Output folder (where flattened CSVs go)
-BNZ_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\BNZ"
-
-# Create output folder if it doesn't exist
-os.makedirs(BNZ_OUTPUT_PATH, exist_ok=True)
+_adls = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -193,26 +194,22 @@ def process_table(table_name: str, test_run: bool = False,
     """
     start_time = time.time()
     
-    input_file = os.path.join(TNS_INPUT_PATH, f"{table_name}.csv")
-    output_file = os.path.join(BNZ_OUTPUT_PATH, f"{table_name}.csv")
+    input_file = f"{TNS_INPUT_PATH}/{table_name}.csv"
+    output_file = f"{BNZ_OUTPUT_PATH}/{table_name}.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 PROCESSING: {table_name}")
     print(f"{'='*80}")
     
     # Check if input file exists
-    if not os.path.exists(input_file):
+    if not _adls.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
-        # Get file size for context
-        file_size = os.path.getsize(input_file) / (1024 * 1024)  # MB
-        print(f"   📦 File size: {file_size:.2f} MB")
-        
         # Read the CSV
         print(f"   📂 Reading CSV...")
-        df = pd.read_csv(input_file)
+        df = _adls.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -304,18 +301,14 @@ def process_table(table_name: str, test_run: bool = False,
         df_result = df_result[cols]
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        # Save to CSV
-        if wipe_data or not os.path.exists(output_file):
-            df_result.to_csv(output_file, index=False, encoding='utf-8')
+        if wipe_data or not _adls.exists(output_file):
+            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
         else:
-            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                df_existing = pd.read_csv(output_file)
-                df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-                df_combined.to_csv(output_file, index=False, encoding='utf-8')
-                df_existing = None
-                df_combined = None
-            else:
-                df_result.to_csv(output_file, index=False, encoding='utf-8')
+            df_existing = _adls.read_csv(output_file)
+            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
+            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
+            df_existing = None
+            df_combined = None
         
         # Clear memory
         df_result = None
@@ -348,22 +341,19 @@ def process_inspections_answers(test_run: bool = False, wipe_data: bool = True) 
     """
     start_time = time.time()
     table_name = "inspections_answers"
-    input_file = os.path.join(TNS_INPUT_PATH, f"{table_name}.csv")
-    output_file = os.path.join(BNZ_OUTPUT_PATH, "inspections_answers_flattened.csv")
+    input_file = f"{TNS_INPUT_PATH}/{table_name}.csv"
+    output_file = f"{BNZ_OUTPUT_PATH}/inspections_answers_flattened.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 SPECIAL PROCESSING: {table_name} (Question/Answer extraction)")
     print(f"{'='*80}")
     
-    if not os.path.exists(input_file):
+    if not _adls.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
-        file_size = os.path.getsize(input_file) / (1024 * 1024)
-        print(f"   📦 File size: {file_size:.2f} MB")
-        
-        df = pd.read_csv(input_file)
+        df = _adls.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -448,15 +438,12 @@ def process_inspections_answers(test_run: bool = False, wipe_data: bool = True) 
         df_result = df_result[cols]
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        if wipe_data or not os.path.exists(output_file):
-            df_result.to_csv(output_file, index=False, encoding='utf-8')
+        if wipe_data or not _adls.exists(output_file):
+            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
         else:
-            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                df_existing = pd.read_csv(output_file)
-                df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-                df_combined.to_csv(output_file, index=False, encoding='utf-8')
-            else:
-                df_result.to_csv(output_file, index=False, encoding='utf-8')
+            df_existing = _adls.read_csv(output_file)
+            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
+            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
         
         df_result = None
         df = None
@@ -486,19 +473,19 @@ def process_issues_answers(test_run: bool = False, wipe_data: bool = True) -> Tu
     """
     start_time = time.time()
     table_name = "issues_list"
-    input_file = os.path.join(BNZ_OUTPUT_PATH, f"{table_name}.csv")
-    output_file = os.path.join(BNZ_OUTPUT_PATH, "issues_answers.csv")
+    input_file = f"{BNZ_OUTPUT_PATH}/{table_name}.csv"
+    output_file = f"{BNZ_OUTPUT_PATH}/issues_answers.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 SPECIAL PROCESSING: Issues Answers (from {table_name})")
     print(f"{'='*80}")
     
-    if not os.path.exists(input_file):
+    if not _adls.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
-        df = pd.read_csv(input_file)
+        df = _adls.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -545,15 +532,12 @@ def process_issues_answers(test_run: bool = False, wipe_data: bool = True) -> Tu
         df_result = df[desired_cols].copy()
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        if wipe_data or not os.path.exists(output_file):
-            df_result.to_csv(output_file, index=False, encoding='utf-8')
+        if wipe_data or not _adls.exists(output_file):
+            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
         else:
-            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                df_existing = pd.read_csv(output_file)
-                df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-                df_combined.to_csv(output_file, index=False, encoding='utf-8')
-            else:
-                df_result.to_csv(output_file, index=False, encoding='utf-8')
+            df_existing = _adls.read_csv(output_file)
+            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
+            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
         
         elapsed = time.time() - start_time
         print(f"   ✅ Completed in {elapsed:.2f} seconds")

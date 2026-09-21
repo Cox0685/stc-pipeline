@@ -8,18 +8,21 @@ Then updates gld_sites.csv with Site Area information
 """
 
 import os
+import sys
 import pandas as pd
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+GLD_PREFIX = "GLD"
+REP_PREFIX = "REP"
 
-# Create output folder if it doesn't exist
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # MAIN PROCESSING
@@ -29,21 +32,21 @@ def main():
     print("=" * 80)
     print("⚔️  RP2 SITE STATUS REPORT")
     print("=" * 80)
-    print(f"📁 Input: {GLD_INPUT_PATH}")
-    print(f"📁 Output: {REP_OUTPUT_PATH}")
+    print(f"📁 Input: ADLS/{GLD_PREFIX}")
+    print(f"📁 Output: ADLS/{REP_PREFIX}")
     print("=" * 80)
     
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_actions.csv")
+    input_file = f"{GLD_PREFIX}/gld_actions.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ Input file not found: {input_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(input_file)}")
+    print(f"\n📂 Reading: {input_file}")
     
     try:
         # Read the CSV
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         
         # Check required columns
@@ -122,8 +125,8 @@ def main():
         # STEP 4: Save to REP folder
         # ====================================================================
         
-        output_file = os.path.join(REP_OUTPUT_PATH, "rp2_site_status.csv")
-        df_output.to_csv(output_file, index=False, encoding='utf-8')
+        output_file = f"{REP_PREFIX}/rp2_site_status.csv"
+        client.write_csv(df_output, output_file, index=False, encoding='utf-8')
         
         print(f"\n✅ Saved to: {output_file}")
         print(f"   📊 {len(df_output):,} rows, {len(df_output.columns)} columns")
@@ -175,15 +178,15 @@ def update_sites_file(df_site_status):
     print("📋 UPDATING GLD_SITES.CSV WITH SITE AREA")
     print("=" * 80)
     
-    sites_file = os.path.join(GLD_INPUT_PATH, "gld_sites.csv")
+    sites_file = f"{GLD_PREFIX}/gld_sites.csv"
     
-    if not os.path.exists(sites_file):
+    if not client.exists(sites_file):
         print(f"❌ Sites file not found: {sites_file}")
         return
     
     try:
         # Read the sites CSV
-        df_sites = pd.read_csv(sites_file, dtype=str, low_memory=False)
+        df_sites = client.read_csv(sites_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_sites):,} rows from gld_sites.csv")
         print(f"   📋 Columns in gld_sites.csv: {list(df_sites.columns)}")
         
@@ -229,7 +232,7 @@ def update_sites_file(df_site_status):
         print(f"   ✅ Updated 'Site Area' for {updated_count:,} sites")
         
         # Save the updated sites file
-        df_sites.to_csv(sites_file, index=False, encoding='utf-8')
+        client.write_csv(df_sites, sites_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved updated gld_sites.csv")
         
         # Show summary of Site Area distribution in sites file

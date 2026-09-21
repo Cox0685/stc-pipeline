@@ -7,14 +7,19 @@ Reads gld_groups.csv, adds Reporting_Group column based on GroupName mapping
 """
 
 import os
+import sys
 import pandas as pd
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
+GLD_PREFIX = "GLD"
+
+client = azure_io.get_client()
 
 # ============================================================================
 # REPORTING GROUP MAPPING (GroupName -> Reporting Group)
@@ -42,8 +47,8 @@ reporting_group_mapping = {
 print("=" * 80)
 print("⚔️  ADDING REPORTING GROUP TO GLD GROUPS")
 print("=" * 80)
-print(f"📁 Input: {GLD_INPUT_PATH}")
-print(f"📁 Output: {GLD_OUTPUT_PATH}")
+print(f"📁 Input: ADLS/{GLD_PREFIX}")
+print(f"📁 Output: ADLS/{GLD_PREFIX}")
 print("=" * 80)
 
 # ============================================================================
@@ -78,16 +83,16 @@ def get_reporting_group(group_name: str) -> str:
 # ============================================================================
 
 def main():
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_groups.csv")
+    input_file = f"{GLD_PREFIX}/gld_groups.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(input_file)}")
+    print(f"\n📂 Reading: {input_file}")
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         print(f"   📋 Columns: {list(df.columns)}")
         
@@ -123,9 +128,9 @@ def main():
             for group in non_reporter['GroupName'].unique():
                 print(f"   {group}")
         
-        # Save back to GLD folder
-        output_file = os.path.join(GLD_OUTPUT_PATH, "gld_groups.csv")
-        df.to_csv(output_file, index=False, encoding='utf-8')
+        # Save back to GLD tier
+        output_file = f"{GLD_PREFIX}/gld_groups.csv"
+        client.write_csv(df, output_file, index=False, encoding='utf-8')
         print(f"\n✅ Saved to: {output_file}")
         print(f"   📊 {len(df):,} rows, {len(df.columns)} columns")
         print(f"   📋 New column: Reporting_Group")

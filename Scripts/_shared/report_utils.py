@@ -12,6 +12,9 @@ alone rather than silently merged.
 
 import os
 import pandas as pd
+import azure_io
+
+client = azure_io.get_client()
 
 
 def clean_site_name_from_string(name):
@@ -33,19 +36,19 @@ def clean_site_name_from_string(name):
     return name_str
 
 
-def load_site_lookup(gld_input_path):
+def load_site_lookup(gld_prefix):
     """
     Load the site lookup from gld_sites.csv
     Returns a dictionary mapping site_id to site_name
     """
-    site_lookup_path = os.path.join(gld_input_path, "gld_sites.csv")
+    site_lookup_path = f"{gld_prefix}/gld_sites.csv"
 
-    if not os.path.exists(site_lookup_path):
+    if not client.exists(site_lookup_path):
         print(f"   ⚠️ gld_sites.csv not found at: {site_lookup_path}")
         return {}
 
     try:
-        df_sites = pd.read_csv(site_lookup_path, dtype=str, low_memory=False)
+        df_sites = client.read_csv(site_lookup_path, dtype=str, low_memory=False)
         print(f"   ✅ Loaded gld_sites.csv ({len(df_sites):,} rows)")
 
         # Find id and name columns

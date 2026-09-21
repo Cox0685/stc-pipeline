@@ -4,22 +4,26 @@
 """
 Filter, Stack and Pivot Incidents - Robust Production Version
 Reads gld_issues_answers.csv, filters, stacks, maps to aliases, pivots to columns
+Combines separate _at and _at_time fields into complete datetime columns.
 """
 
 import os
+import sys
 import pandas as pd
 import re
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+GLD_PREFIX = "GLD"
+REP_PREFIX = "REP"
 
-# Create output folder if it doesn't exist
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -34,8 +38,8 @@ CATEGORY_KEY_FILTER = "005 INCIDENT REPORT"
 print("=" * 80)
 print("⚔️  FILTER, STACK AND PIVOT INCIDENTS (ROBUST)")
 print("=" * 80)
-print(f"📁 Input (GLD): {GLD_INPUT_PATH}")
-print(f"📁 Output (REP): {REP_OUTPUT_PATH}")
+print(f"📁 Input (GLD): ADLS/{GLD_PREFIX}")
+print(f"📁 Output (REP): ADLS/{REP_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print(f"🔍 Filter: category_key contains '{CATEGORY_KEY_FILTER}'")
 print("=" * 80)
@@ -223,31 +227,64 @@ def get_answer_for_question(row, q_idx, all_columns):
             
     return ''
 
+def combine_date_and_time_series(df, date_col, time_col):
+    """
+    Combines date_col and time_col into date_col in-place, keeping the column name as is.
+    Extracts true date even if date_col contains 00:00:00 or T00:00:00.
+    """
+    if date_col not in df.columns or time_col not in df.columns:
+        return
+
+    def _combine(d, t):
+        d_str = str(d).strip() if pd.notna(d) else ''
+        t_str = str(t).strip() if pd.notna(t) else ''
+
+        if d_str.lower() in ['nan', 'none', 'null', 'nat', '']:
+            return ''
+        if t_str.lower() in ['nan', 'none', 'null', 'nat', '']:
+            return d_str
+
+        # Isolate the pure date component
+        date_part = d_str.split('T')[0].split(' ')[0].strip()
+        if not date_part:
+            return d_str
+
+        return f"{date_part} {t_str}"
+
+    df[date_col] = [_combine(d, t) for d, t in zip(df[date_col], df[time_col])]
+
 # ============================================================================
 # MAIN PROCESSING
 # ============================================================================
 
 def main():
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_issues_answers.csv")
-    output_file = os.path.join(REP_OUTPUT_PATH, "rp2_incidents.csv")
+    input_file = f"{GLD_PREFIX}/gld_issues_answers.csv"
+    output_file = f"{REP_PREFIX}/rp2_incidents.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ Input file not found: {input_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(input_file)}")
+    print(f"\n📂 Reading: {input_file}")
     
     try:
         # Load raw CSV with keep_default_na=False to avoid unwanted NaN values
-        df = pd.read_csv(input_file, dtype=str, keep_default_na=False, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, keep_default_na=False, low_memory=False)
+        df.columns = df.columns.str.strip()
         print(f"   ✅ Loaded {len(df):,} rows | Total columns: {len(df.columns)}")
-        
+
+        # Combine date and time columns into date column
+        print("🕒 Merging separate date & time columns (task_created_at, task_modified_at, task_occurred_at)...")
+        combine_date_and_time_series(df, 'task_created_at', 'task_created_at_time')
+        combine_date_and_time_series(df, 'task_modified_at', 'task_modified_at_time')
+        combine_date_and_time_series(df, 'task_occurred_at', 'task_occurred_at_time')
+
         # ====================================================================
         # RAW DATA DATE SUMMARY
         # ====================================================================
         print("\n📅 Raw Data Summary:")
         if 'task_occurred_at' in df.columns:
-            parsed_dates = pd.to_datetime(df['task_occurred_at'], errors='coerce').dropna()
+            parsed_dates = pd.to_datetime(df['task_occurred_at'], dayfirst=True, errors='coerce').dropna()
             if not parsed_dates.empty:
                 print(f"   📅 Date range in file: {parsed_dates.min()} to {parsed_dates.max()}")
                 most_recent_idx = parsed_dates.idxmax()
@@ -338,7 +375,7 @@ def main():
         ]
         
         extracted_data = []
-        unknown_questions_map = {}  # {question_id: set(task_unique_ids)}
+        unknown_questions_map = {}
         tasks_with_answers = set()
         all_cols_list = df_filtered.columns.tolist()
 
@@ -441,7 +478,7 @@ def main():
         # ====================================================================
         # STEP 5: SAVE & REPORT SUMMARY
         # ====================================================================
-        final_df.to_csv(output_file, index=False, encoding='utf-8')
+        client.write_csv(final_df, output_file, index=False, encoding='utf-8')
         print(f"\n✅ Output successfully saved: {output_file}")
         print(f"   📊 Total Rows: {len(final_df):,} | Total Columns: {len(final_df.columns)}")
         
@@ -450,7 +487,7 @@ def main():
 
         print("\n📋 Sample of Output (First 5 rows):")
         display_cols = [
-            c for c in ['task_unique_id', 'task_occurred_at', 'Category', 'Details', 'Reporter', 'Lost Time'] 
+            c for c in ['task_unique_id', 'task_occurred_at', 'task_created_at', 'Category', 'Details', 'Reporter', 'Lost Time'] 
             if c in final_df.columns
         ]
         print(final_df[display_cols].head(5).to_string(index=False))

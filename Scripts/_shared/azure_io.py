@@ -46,6 +46,17 @@ Paths passed to these functions are POSIX-style relative paths inside the
 filesystem, mirroring the old folder structure, e.g.:
     "TNS/incidents_raw.csv"
     "GLD/archive/2026-09-14_101530/gld_sites.csv"
+    "REP/rp2_metric_list.csv"
+    "TABLES/gld_actions.csv"
+
+TNS -> BNZ -> SLV -> GLD -> REP -> TABLES mirrors the local pipeline's data
+tiers exactly (TNS/SLV/GLD/REP were the original local folder names; TABLES
+is the ADLS equivalent of the local SHEQ Portal's assets\\tables folder -
+the pipeline's actual delivery point for the front-end web app). All of
+them live as top-level prefixes inside the ONE ADLS filesystem this
+pipeline already has provisioned (stc-data) - no separate storage account
+or filesystem per tier, same as the local version used one Data\\ folder
+with subfolders for each tier.
 """
 
 import io
@@ -107,6 +118,17 @@ class ADLSClient:
         data = blob_client.download_blob().readall()
         return pd.read_csv(io.BytesIO(data), **read_csv_kwargs)
 
+    def read_bytes(self, path: str) -> bytes:
+        """
+        Raw bytes for anything that isn't a plain CSV read via pandas -
+        an Excel workbook opened with openpyxl (for its multi-sheet /
+        formatting-aware reads, which pd.read_excel can't do), a PDF,
+        or any other binary/text file. Wrap the result in io.BytesIO()
+        for openpyxl.load_workbook() or pd.read_excel().
+        """
+        blob_client = self.container_client.get_blob_client(path)
+        return blob_client.download_blob().readall()
+
     def list_files(self, folder: str, suffix: str = ".csv") -> List[str]:
         """
         Lists files directly under `folder` (top-level only, not recursive) -
@@ -124,6 +146,46 @@ class ADLSClient:
             results.append(name)
         return results
 
+    def list_files_with_dates(self, folder: str, suffix: str = ".xlsx") -> List[tuple]:
+        """
+        Like list_files(), but also returns each blob's last-modified
+        timestamp as (path, last_modified_datetime) - the data-lake
+        equivalent of scanning a folder for files and checking
+        Path.stat().st_mtime. Used for "most recently uploaded file
+        matching this pattern" lookups (e.g. the monthly timesheet drop),
+        the same approach as the local find_latest_timesheet() helper -
+        picking by actual upload recency rather than trying to parse a
+        date out of the filename, which breaks the moment someone names
+        a file differently.
+        """
+        prefix = folder.rstrip("/") + "/" if folder else ""
+        results = []
+        for blob in self.container_client.list_blobs(name_starts_with=prefix):
+            name = blob.name
+            if not name.endswith(suffix):
+                continue
+            relative = name[len(prefix):]
+            if "/" in relative:
+                continue
+            results.append((name, blob.last_modified))
+        return results
+
+    def find_latest_file(self, folder: str, suffix: str = ".xlsx",
+                          name_contains: Optional[str] = None) -> Optional[str]:
+        """
+        Returns the path of the most recently uploaded file under `folder`
+        matching `suffix` (and, if given, containing `name_contains` in its
+        filename) - or None if nothing matches. Direct replacement for the
+        local find_latest_timesheet() pattern, applied against blob upload
+        time instead of filesystem mtime.
+        """
+        candidates = self.list_files_with_dates(folder, suffix=suffix)
+        if name_contains:
+            candidates = [(p, d) for p, d in candidates if name_contains in p]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[1])[0]
+
     # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------
@@ -133,6 +195,17 @@ class ADLSClient:
         buf = io.StringIO()
         df.to_csv(buf, **to_csv_kwargs)
         data = buf.getvalue().encode("utf-8")
+        self.container_client.get_blob_client(path).upload_blob(data, overwrite=True)
+
+    def write_bytes(self, data: bytes, path: str) -> None:
+        """
+        Uploads raw bytes to `path`, overwriting anything already there.
+        Used for anything built with a library that needs a real
+        file-like object to write into - openpyxl's ExcelWriter (MCL39's
+        formatted workbook), for instance: build it into an io.BytesIO()
+        buffer locally exactly as before, then pass buffer.getvalue() here
+        instead of writing to a local .xlsx path.
+        """
         self.container_client.get_blob_client(path).upload_blob(data, overwrite=True)
 
     def append_csv(self, df: pd.DataFrame, path: str, **to_csv_kwargs) -> None:

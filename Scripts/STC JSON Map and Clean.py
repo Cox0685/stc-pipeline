@@ -2,8 +2,8 @@
 # coding: utf-8
 
 """
-STC JSON Map and Clean - Local Version (Optimized)
-Reads CSVs from TNS folder, flattens JSON, outputs to BNZ folder
+STC JSON Map and Clean - Azure Version
+Reads CSVs from the TNS tier in ADLS, flattens JSON, writes to the BNZ tier.
 """
 
 import json
@@ -25,12 +25,28 @@ sys.setrecursionlimit(10000)
 # CONFIGURATION
 # ============================================================================
 
-# Data lake folder names (was a local OneDrive path) - both live inside the
-# same ADLS Gen2 filesystem, ADLS_FILESYSTEM env var
-TNS_INPUT_PATH = "TNS"
-BNZ_OUTPUT_PATH = "BNZ"
+# ADLS tier prefixes (paths inside the one shared "stc-data" filesystem) -
+# these replace what were local TNS/BNZ folder paths. See _shared/azure_io.py.
+TNS_PREFIX = "TNS"
+BNZ_PREFIX = "BNZ"
 
-_adls = azure_io.get_client()
+client = azure_io.get_client()
+
+
+def _save_output(df_result: pd.DataFrame, output_path: str, wipe_data: bool) -> None:
+    """
+    Data-lake equivalent of the local "overwrite if wiping, else
+    read-existing + concat + rewrite" pattern this file used three times.
+    Pulled into one helper so all three call sites behave identically
+    rather than drifting - the local version had this logic duplicated
+    inline in each of the three processing functions.
+    """
+    if wipe_data or not client.exists(output_path):
+        client.write_csv(df_result, output_path, index=False, encoding="utf-8")
+    else:
+        df_existing = client.read_csv(output_path)
+        df_combined = pd.concat([df_existing, df_result], ignore_index=True)
+        client.write_csv(df_combined, output_path, index=False, encoding="utf-8")
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -49,6 +65,12 @@ COUNTER_CONTAINERS = ["question_answers", "items"]
 # ============================================================================
 # TABLE TOGGLES - True = process this table, False = skip it
 # ============================================================================
+# NOTE: TABLE_TOGGLES.get(table, False) below defaults to False for any
+# table not listed here - meaning a table missing from this dict gets
+# silently SKIPPED, not silently included. headsup_list/headsup_users were
+# previously missing from this dict entirely (not set to False - just not
+# here at all), which is exactly what caused them to be silently excluded
+# from every run. Fixed by adding them explicitly.
 
 TABLE_TOGGLES = {
     "actions_feed": True,
@@ -57,6 +79,8 @@ TABLE_TOGGLES = {
     "audits_search": True,
     "groups_list": True,
     "groups_users": True,
+    "headsup_list": True,
+    "headsup_users": True,
     "incidents_details": True,
     "incidents_feed": True,
     "inspections_answers": True,
@@ -71,6 +95,30 @@ TABLE_TOGGLES = {
     "users_feed": True,
     "user_groups": True
 }
+
+# Runtime override from STC Pipeline Runner.py (optional) - lets the same
+# flow toggles that control Stage 1's API pull also control which tables
+# get processed here, so one setting drives every stage instead of four
+# separate TABLE_TOGGLES dicts drifting apart. Falls back to the dict above
+# untouched when run standalone (no env var set).
+_table_overrides_raw = os.environ.get("TABLE_ENABLED_OVERRIDES")
+if _table_overrides_raw:
+    try:
+        _table_overrides = json.loads(_table_overrides_raw)
+        _applied = 0
+        _unmatched = []
+        for _table_name, _enabled in _table_overrides.items():
+            if _table_name in TABLE_TOGGLES:
+                TABLE_TOGGLES[_table_name] = _enabled
+                _applied += 1
+            else:
+                _unmatched.append(_table_name)
+        print(f"🔧 Applied {_applied} table toggle override(s) from Pipeline Runner")
+        if _unmatched:
+            print(f"   ℹ️ {len(_unmatched)} override(s) had no matching key here (fine if this "
+                  f"stage doesn't produce that table): {_unmatched}")
+    except Exception as e:
+        print(f"⚠️ Could not parse TABLE_ENABLED_OVERRIDES - ignoring, using TABLE_TOGGLES as written: {e}")
 
 # Special processing toggles
 PROCESS_INSPECTIONS_ANSWERS_FLATTENED = True
@@ -87,6 +135,8 @@ tables = [
     "audits_search",
     "groups_list",
     "groups_users",
+    "headsup_list",
+    "headsup_users",
     "incidents_details",
     "incidents_feed",
     "inspections_answers",
@@ -105,8 +155,8 @@ tables = [
 print("=" * 80)
 print("⚔️  STC JSON MAP AND CLEAN - LOCAL VERSION (OPTIMIZED)")
 print("=" * 80)
-print(f"📁 Input: {TNS_INPUT_PATH}")
-print(f"📁 Output: {BNZ_OUTPUT_PATH}")
+print(f"📁 Input: ADLS/{TNS_PREFIX}")
+print(f"📁 Output: ADLS/{BNZ_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 if TEST_RUN:
     print(f"   📊 Test Limit: {TEST_LIMIT} rows per table")
@@ -194,22 +244,22 @@ def process_table(table_name: str, test_run: bool = False,
     """
     start_time = time.time()
     
-    input_file = f"{TNS_INPUT_PATH}/{table_name}.csv"
-    output_file = f"{BNZ_OUTPUT_PATH}/{table_name}.csv"
+    input_file = f"{TNS_PREFIX}/{table_name}.csv"
+    output_file = f"{BNZ_PREFIX}/{table_name}.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 PROCESSING: {table_name}")
     print(f"{'='*80}")
     
     # Check if input file exists
-    if not _adls.exists(input_file):
+    if not client.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
         # Read the CSV
         print(f"   📂 Reading CSV...")
-        df = _adls.read_csv(input_file)
+        df = client.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -301,14 +351,7 @@ def process_table(table_name: str, test_run: bool = False,
         df_result = df_result[cols]
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        if wipe_data or not _adls.exists(output_file):
-            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
-        else:
-            df_existing = _adls.read_csv(output_file)
-            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
-            df_existing = None
-            df_combined = None
+        _save_output(df_result, output_file, wipe_data)
         
         # Clear memory
         df_result = None
@@ -341,19 +384,19 @@ def process_inspections_answers(test_run: bool = False, wipe_data: bool = True) 
     """
     start_time = time.time()
     table_name = "inspections_answers"
-    input_file = f"{TNS_INPUT_PATH}/{table_name}.csv"
-    output_file = f"{BNZ_OUTPUT_PATH}/inspections_answers_flattened.csv"
+    input_file = f"{TNS_PREFIX}/{table_name}.csv"
+    output_file = f"{BNZ_PREFIX}/inspections_answers_flattened.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 SPECIAL PROCESSING: {table_name} (Question/Answer extraction)")
     print(f"{'='*80}")
     
-    if not _adls.exists(input_file):
+    if not client.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
-        df = _adls.read_csv(input_file)
+        df = client.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -438,12 +481,7 @@ def process_inspections_answers(test_run: bool = False, wipe_data: bool = True) 
         df_result = df_result[cols]
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        if wipe_data or not _adls.exists(output_file):
-            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
-        else:
-            df_existing = _adls.read_csv(output_file)
-            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
+        _save_output(df_result, output_file, wipe_data)
         
         df_result = None
         df = None
@@ -473,19 +511,19 @@ def process_issues_answers(test_run: bool = False, wipe_data: bool = True) -> Tu
     """
     start_time = time.time()
     table_name = "issues_list"
-    input_file = f"{BNZ_OUTPUT_PATH}/{table_name}.csv"
-    output_file = f"{BNZ_OUTPUT_PATH}/issues_answers.csv"
+    input_file = f"{BNZ_PREFIX}/{table_name}.csv"
+    output_file = f"{BNZ_PREFIX}/issues_answers.csv"
     
     print(f"\n{'='*80}")
     print(f"📋 SPECIAL PROCESSING: Issues Answers (from {table_name})")
     print(f"{'='*80}")
     
-    if not _adls.exists(input_file):
+    if not client.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0, 0
     
     try:
-        df = _adls.read_csv(input_file)
+        df = client.read_csv(input_file)
         total_rows = len(df)
         print(f"   ✅ Loaded {total_rows:,} rows")
         
@@ -532,12 +570,7 @@ def process_issues_answers(test_run: bool = False, wipe_data: bool = True) -> Tu
         df_result = df[desired_cols].copy()
         
         print(f"   💾 Saving to CSV ({len(df_result.columns)} columns)...")
-        if wipe_data or not _adls.exists(output_file):
-            _adls.write_csv(df_result, output_file, index=False, encoding='utf-8')
-        else:
-            df_existing = _adls.read_csv(output_file)
-            df_combined = pd.concat([df_existing, df_result], ignore_index=True)
-            _adls.write_csv(df_combined, output_file, index=False, encoding='utf-8')
+        _save_output(df_result, output_file, wipe_data)
         
         elapsed = time.time() - start_time
         print(f"   ✅ Completed in {elapsed:.2f} seconds")

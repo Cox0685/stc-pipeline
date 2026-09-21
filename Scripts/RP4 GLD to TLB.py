@@ -1,36 +1,44 @@
 import pandas as pd
 import os
+import sys
 import re
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
+
+client = azure_io.get_client()
 
 # ==========================================
 # 1. DEFINE FILE PATHS
 # ==========================================
+# ADLS tier prefixes replace what were local GLD/REP paths and the SHEQ
+# Portal's local "assets/tables" folder. TABLES is the ADLS equivalent of
+# that folder - the pipeline's actual delivery point for the front-end web
+# app (see _shared/azure_io.py's module docstring for the full tier list).
 raw_paths = {
-    "actions": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_actions.csv",
-    "issues": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_issues.csv",
-    "inspections": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_inspections.csv",
-    "incidents": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP\rp2_incidents.csv",
-    "esg": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP\rp1_esg_cards_hours.csv",
+    "actions": "GLD/gld_actions.csv",
+    "issues": "GLD/gld_issues.csv",
+    "inspections": "GLD/gld_inspections.csv",
+    "incidents": "REP/rp2_incidents.csv",
+    "esg": "REP/rp1_esg_report.csv",
     # User / Site / Group mapping sources
-    "users": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_users.csv",
-    "sites": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_SHEQ_Portal\assets\tables\gld_sites.csv",
-    "site_members": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_site_members.csv",
-    "groups": r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD\gld_groups.csv"
+    "users": "GLD/gld_users.csv",
+    "sites": "TABLES/gld_sites.csv",
+    "site_members": "GLD/gld_site_members.csv",
+    "groups": "GLD/gld_groups.csv"
 }
 
 sites_lookup_path = raw_paths["sites"]
-output_dir = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_SHEQ_Portal\assets\tables"
+output_dir = "TABLES"
 
 output_paths = {
-    "actions": os.path.join(output_dir, "gld_actions.csv"),
-    "issues": os.path.join(output_dir, "gld_issues.csv"),
-    "inspections": os.path.join(output_dir, "gld_inspections.csv"),
-    "incidents": os.path.join(output_dir, "rp2_incidents.csv"),
-    "esg": os.path.join(output_dir, "rp1_esg_cards_hours.csv"),
-    "user_site_groups": os.path.join(output_dir, "gld_user_site_groups.csv")
+    "actions": f"{output_dir}/gld_actions.csv",
+    "issues": f"{output_dir}/gld_issues.csv",
+    "inspections": f"{output_dir}/gld_inspections.csv",
+    "incidents": f"{output_dir}/rp2_incidents.csv",
+    "esg": f"{output_dir}/rp1_esg_report.csv",
+    "user_site_groups": f"{output_dir}/gld_user_site_groups.csv"
 }
-
-os.makedirs(output_dir, exist_ok=True)
 
 # ==========================================
 # 2. DEFINE LEAN COLUMNS PER SOURCE
@@ -72,8 +80,8 @@ cols_incidents = [
 
 print("\n[0/6] Loading Site Area Reference Map...")
 sites_map = {}
-if os.path.exists(sites_lookup_path):
-    df_sites = pd.read_csv(sites_lookup_path, usecols=['name', 'Site Area'], low_memory=False)
+if client.exists(sites_lookup_path):
+    df_sites = client.read_csv(sites_lookup_path, usecols=['name', 'Site Area'], low_memory=False)
     df_sites = df_sites.dropna(subset=['name', 'Site Area'])
     sites_map = dict(zip(df_sites['name'].astype(str).str.strip(), df_sites['Site Area'].astype(str).str.strip()))
     print(f" -> Successfully mapped {len(sites_map):,} site areas from {sites_lookup_path}")
@@ -150,7 +158,7 @@ geo_frames = []
 
 # --- A. ISSUES / SORS ---
 print("\n[1/6] Processing Issues & SORs...")
-df_issues = pd.read_csv(raw_paths['issues'], usecols=lambda c: c in cols_issues, low_memory=False)
+df_issues = client.read_csv(raw_paths['issues'], usecols=lambda c: c in cols_issues, low_memory=False)
 df_issues['source_type'] = 'issue'
 format_creator(df_issues, 'task_creator_firstname', 'task_creator_lastname')
 
@@ -179,12 +187,12 @@ lat_map = geo_reference['latitude'].to_dict()
 lon_map = geo_reference['longitude'].to_dict()
 
 df_issues = reorder_columns(df_issues)
-df_issues.to_csv(output_paths['issues'], index=False)
+client.write_csv(df_issues, output_paths['issues'], index=False)
 print(f" -> Deployed Issues: {len(df_issues):,} rows to {output_paths['issues']}")
 
 # --- B. ACTIONS ---
 print("\n[2/6] Processing Actions...")
-df_actions = pd.read_csv(raw_paths['actions'], usecols=lambda c: c in cols_actions, low_memory=False)
+df_actions = client.read_csv(raw_paths['actions'], usecols=lambda c: c in cols_actions, low_memory=False)
 df_actions['source_type'] = 'action'
 format_creator(df_actions, 'task_creator_firstname', 'task_creator_lastname')
 
@@ -205,12 +213,12 @@ df_actions['longitude'] = df_actions['site_name'].map(lon_map)
 update_global_lookups(df_actions)
 
 df_actions = reorder_columns(df_actions)
-df_actions.to_csv(output_paths['actions'], index=False)
+client.write_csv(df_actions, output_paths['actions'], index=False)
 print(f" -> Deployed Actions: {len(df_actions):,} rows to {output_paths['actions']}")
 
 # --- C. INSPECTIONS ---
 print("\n[3/6] Processing Inspections...")
-df_inspections = pd.read_csv(raw_paths['inspections'], usecols=lambda c: c in cols_inspections, low_memory=False)
+df_inspections = client.read_csv(raw_paths['inspections'], usecols=lambda c: c in cols_inspections, low_memory=False)
 df_inspections['source_type'] = 'inspection'
 if 'author_name' in df_inspections.columns:
     df_inspections['creator'] = df_inspections['author_name']
@@ -235,12 +243,12 @@ geo_frames.append(valid_geo_inspections)
 update_global_lookups(df_inspections)
 
 df_inspections = reorder_columns(df_inspections)
-df_inspections.to_csv(output_paths['inspections'], index=False)
+client.write_csv(df_inspections, output_paths['inspections'], index=False)
 print(f" -> Deployed Inspections: {len(df_inspections):,} rows to {output_paths['inspections']}")
 
 # --- D. INCIDENTS ---
 print("\n[4/6] Processing Incidents...")
-df_incidents = pd.read_csv(raw_paths['incidents'], usecols=lambda c: c in cols_incidents, low_memory=False)
+df_incidents = client.read_csv(raw_paths['incidents'], usecols=lambda c: c in cols_incidents, low_memory=False)
 df_incidents['source_type'] = 'incident'
 format_creator(df_incidents, 'task_creator_firstname', 'task_creator_lastname')
 
@@ -273,7 +281,7 @@ geo_frames.append(valid_geo_incidents)
 update_global_lookups(df_incidents)
 
 df_incidents = reorder_columns(df_incidents)
-df_incidents.to_csv(output_paths['incidents'], index=False)
+client.write_csv(df_incidents, output_paths['incidents'], index=False)
 print(f" -> Deployed Incidents: {len(df_incidents):,} rows to {output_paths['incidents']}")
 
 # Recompute master aggregate latitude & longitude maps across all datasets
@@ -285,7 +293,7 @@ print(f" -> Master Reference compiled: {len(sites_map):,} site areas & {len(mast
 
 # --- E. ESG CARDS & HOURS ---
 print("\n[5/6] Processing ESG Cards Hours...")
-df_esg = pd.read_csv(raw_paths['esg'], low_memory=False)
+df_esg = client.read_csv(raw_paths['esg'], low_memory=False)
 
 site_candidates = ['client_site', 'task_site_name', 'site_name', 'Site Client', 'site']
 matched_site_col = next((c for c in site_candidates if c in df_esg.columns), None)
@@ -318,7 +326,7 @@ if matched_site_col:
 else:
     print(" -> WARNING: No matching site column found in ESG Cards dataset. Exporting as-is.")
 
-df_esg.to_csv(output_paths['esg'], index=False)
+client.write_csv(df_esg, output_paths['esg'], index=False)
 print(f" -> Deployed ESG Cards Hours: {len(df_esg):,} rows to {output_paths['esg']}")
 
 
@@ -333,7 +341,7 @@ else:
     print("\n[6/6] Generating Master User-Site-Group Table from gld_sites.csv Truth...")
 
     # 1. Load users & create normalized user lookup table
-    df_u = pd.read_csv(raw_paths['users'], low_memory=False)
+    df_u = client.read_csv(raw_paths['users'], low_memory=False)
 
     def clean_user_full_name(row):
         fn = str(row.get('firstname', '')).strip() if pd.notna(row.get('firstname')) else ''
@@ -352,7 +360,7 @@ else:
     df_u.rename(columns={'id': 'user_id', 'active': 'user_active', 'seat_type': 'user_seat_type'}, inplace=True)
 
     # 2. Load sites (Source of Truth) and explode the 'Members' column
-    df_sites_truth = pd.read_csv(raw_paths['sites'], low_memory=False)
+    df_sites_truth = client.read_csv(raw_paths['sites'], low_memory=False)
     df_sites_truth = df_sites_truth.rename(columns={'id': 'site_id', 'name': 'site_name', 'Site Area': 'site_area'})
 
     # Extract and expand members
@@ -387,8 +395,8 @@ else:
     )
 
     # 4. Fallback check: Also include any links from gld_site_members.csv by ID in case of name typos
-    if os.path.exists(raw_paths['site_members']):
-        df_sm_raw = pd.read_csv(raw_paths['site_members'], low_memory=False)
+    if client.exists(raw_paths['site_members']):
+        df_sm_raw = client.read_csv(raw_paths['site_members'], low_memory=False)
         id_col = 'member_id' if 'member_id' in df_sm_raw.columns else ('user_id' if 'user_id' in df_sm_raw.columns else None)
         
         if id_col and 'site_id' in df_sm_raw.columns:
@@ -401,7 +409,7 @@ else:
             df_site_user_matched = pd.concat([df_site_user_matched, df_sm_id_merged], ignore_index=True).drop_duplicates(subset=['site_id', 'user_id'])
 
     # 5. Load Groups
-    df_g = pd.read_csv(raw_paths['groups'], low_memory=False)
+    df_g = client.read_csv(raw_paths['groups'], low_memory=False)
     df_g = df_g[['user_id', 'GroupName', 'Reporting_Group', 'status']].dropna(subset=['user_id']).drop_duplicates()
     df_g.rename(columns={
         'GroupName': 'group_name',
@@ -432,7 +440,7 @@ else:
     df_master_usg.sort_values(by=['site_name', 'user_name', 'group_name'], inplace=True)
 
     # Export to single CSV table
-    df_master_usg.to_csv(output_paths['user_site_groups'], index=False)
+    client.write_csv(df_master_usg, output_paths['user_site_groups'], index=False)
     print(f" -> Deployed Master User-Site-Group Table: {len(df_master_usg):,} rows to {output_paths['user_site_groups']}")
 
 print("\nAll pipeline tasks completed successfully!")

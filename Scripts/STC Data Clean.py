@@ -2,12 +2,13 @@
 # coding: utf-8
 
 """
-STC Data Clean - Local Version
-Reads from BNZ folder, cleans/standardizes data, outputs to SLV folder
+STC Data Clean - Azure Version
+Reads from the BNZ tier in ADLS, cleans/standardizes data, writes to the SLV tier.
 """
 
 import os
 import sys
+import json
 import pandas as pd
 import re
 import warnings
@@ -24,11 +25,10 @@ warnings.filterwarnings('ignore', category=pd.errors.DtypeWarning)
 # CONFIGURATION
 # ============================================================================
 
-# Data lake folder names (was a local OneDrive path)
-BNZ_INPUT_PATH = "BNZ"
-SLV_OUTPUT_PATH = "SLV"
+BNZ_PREFIX = "BNZ"
+SLV_PREFIX = "SLV"
 
-_adls = azure_io.get_client()
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -49,6 +49,8 @@ TABLE_TOGGLES = {
     "audits_search": True,
     "groups_list": True,
     "groups_users": True,
+    "headsup_list": True,
+    "headsup_users": True,
     "incidents_details": True,
     "incidents_feed": True,
     "inspections_answers": True,
@@ -65,6 +67,28 @@ TABLE_TOGGLES = {
     "users_feed": True
 }
 
+# Runtime override from STC Pipeline Runner.py (optional) - see the matching
+# block in STC JSON Map and Clean.py for the full explanation. Falls back to
+# TABLE_TOGGLES as written when run standalone.
+_table_overrides_raw = os.environ.get("TABLE_ENABLED_OVERRIDES")
+if _table_overrides_raw:
+    try:
+        _table_overrides = json.loads(_table_overrides_raw)
+        _applied = 0
+        _unmatched = []
+        for _table_name, _enabled in _table_overrides.items():
+            if _table_name in TABLE_TOGGLES:
+                TABLE_TOGGLES[_table_name] = _enabled
+                _applied += 1
+            else:
+                _unmatched.append(_table_name)
+        print(f"🔧 Applied {_applied} table toggle override(s) from Pipeline Runner")
+        if _unmatched:
+            print(f"   ℹ️ {len(_unmatched)} override(s) had no matching key here (fine if this "
+                  f"stage doesn't produce that table): {_unmatched}")
+    except Exception as e:
+        print(f"⚠️ Could not parse TABLE_ENABLED_OVERRIDES - ignoring, using TABLE_TOGGLES as written: {e}")
+
 # Deduplication toggles: True = deduplicate this table, False = skip deduplication
 DEDUPE_TOGGLES = {
     "actions_feed": True,
@@ -73,6 +97,8 @@ DEDUPE_TOGGLES = {
     "audits_search": True,
     "groups_list": True,
     "groups_users": True,
+    "headsup_list": True,
+    "headsup_users": True,
     "incidents_details": True,
     "incidents_feed": True,
     "inspections_answers": True,
@@ -97,6 +123,8 @@ TABLE_MAPPING = {
     "audits_search": "audits_search",
     "groups_list": "groups_list",
     "groups_users": "groups_users",
+    "headsup_list": "headsup_list",
+    "headsup_users": "headsup_users",
     "incidents_details": "incidents_details",
     "incidents_feed": "incidents_feed",
     "inspections_answers": "inspections_answers",
@@ -117,6 +145,9 @@ TABLE_MAPPING = {
 # DEDUPLICATION CONFIGURATION
 # ============================================================================
 
+# headsup_list / headsup_users column names confirmed directly (not guessed):
+# headsup_list   -> sort by published_at, dedupe on id
+# headsup_users  -> sort by _IngestedAt, dedupe on _ParentID + id
 dedupe_config = {
     "actions_feed":             {"sort": "modified_at",      "dedupe": ["unique_id"]},
     "actions_retrieve":         {"sort": "task_modified_at", "dedupe": ["task_unique_id"]},
@@ -124,6 +155,8 @@ dedupe_config = {
     "audits_search":            {"sort": "date_modified",    "dedupe": ["id"]},
     "groups_list":              {"sort": "_IngestedAt",      "dedupe": ["id"]},
     "groups_users":             {"sort": "_IngestedAt",      "dedupe": ["_ParentID", "user_id"]},
+    "headsup_list":              {"sort": "published_at",     "dedupe": ["id"]},
+    "headsup_users":             {"sort": "_IngestedAt",      "dedupe": ["_ParentID", "id"]},
     "incidents_details":        {"sort": "modified_at",      "dedupe": ["investigation_id"]},
     "incidents_feed":           {"sort": "modified_at",      "dedupe": ["investigation_id"]},
     "inspections_answers":      {"sort": "_IngestedAt",      "dedupe": ["_ParentID", "result_question_id"]},
@@ -143,8 +176,8 @@ dedupe_config = {
 print("=" * 80)
 print("⚔️  STC DATA CLEAN - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (BNZ): {BNZ_INPUT_PATH}")
-print(f"📁 Output (SLV): {SLV_OUTPUT_PATH}")
+print(f"📁 Input (BNZ): ADLS/{BNZ_PREFIX}")
+print(f"📁 Output (SLV): ADLS/{SLV_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 if TEST_RUN:
     print(f"   📊 Test Limit: 10 rows per table")
@@ -272,19 +305,19 @@ def process_table(source_name: str, target_name: str, test_run: bool = False) ->
     Process a single table: read from BNZ, clean, deduplicate, save to SLV.
     Returns: (rows_processed, rows_failed)
     """
-    input_file = f"{BNZ_INPUT_PATH}/{source_name}.csv"
-    output_file = f"{SLV_OUTPUT_PATH}/{target_name}.csv"
+    input_file = f"{BNZ_PREFIX}/{source_name}.csv"
+    output_file = f"{SLV_PREFIX}/{target_name}.csv"
     
     print(f"\n📋 Processing: {source_name} -> {target_name}")
     
     # Check if input file exists
-    if not _adls.exists(input_file):
+    if not client.exists(input_file):
         print(f"   ⚠️ Input file not found: {input_file}")
         return 0, 0
     
     try:
         # Read the CSV - read all as string to avoid DtypeWarnings
-        df = _adls.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         
         if df.empty:
             print(f"   ⚠️ No data in {source_name}")
@@ -349,7 +382,7 @@ def process_table(source_name: str, target_name: str, test_run: bool = False) ->
             print(f"   ℹ️ Deduplication disabled for {source_name} (via DEDUPE_TOGGLES)")
         
         # Save to SLV
-        _adls.write_csv(df_deduped, output_file, index=False, encoding='utf-8')
+        client.write_csv(df_deduped, output_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved {deduped_count} rows to SLV")
         
         return deduped_count, 0

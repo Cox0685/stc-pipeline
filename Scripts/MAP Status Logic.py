@@ -7,21 +7,21 @@ Reads GLD tables and RP2 reports, adds Reporting_Status column based on table-sp
 """
 
 import os
+import sys
 import pandas as pd
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+GLD_PREFIX = "GLD"
+REP_PREFIX = "REP"
 
-# Create output folders if they don't exist
-os.makedirs(GLD_OUTPUT_PATH, exist_ok=True)
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -33,10 +33,10 @@ TEST_RUN = False
 print("=" * 80)
 print("⚔️  ADD REPORTING STATUS - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 GLD Input: {GLD_INPUT_PATH}")
-print(f"📁 REP Input: {REP_INPUT_PATH}")
-print(f"📁 GLD Output: {GLD_OUTPUT_PATH}")
-print(f"📁 REP Output: {REP_OUTPUT_PATH}")
+print(f"📁 GLD Input: ADLS/{GLD_PREFIX}")
+print(f"📁 REP Input: ADLS/{REP_PREFIX}")
+print(f"📁 GLD Output: ADLS/{GLD_PREFIX}")
+print(f"📁 REP Output: ADLS/{REP_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print("=" * 80)
 
@@ -167,12 +167,12 @@ def main():
     # PROCESS: gld_actions.csv
     # ========================================================================
     
-    actions_file = os.path.join(GLD_INPUT_PATH, "gld_actions.csv")
-    if os.path.exists(actions_file):
+    actions_file = f"{GLD_PREFIX}/gld_actions.csv"
+    if client.exists(actions_file):
         print(f"\n📂 Processing: {os.path.basename(actions_file)}")
         
         try:
-            df = pd.read_csv(actions_file, dtype=str, low_memory=False)
+            df = client.read_csv(actions_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -193,7 +193,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(actions_file, index=False, encoding='utf-8')
+                client.write_csv(df, actions_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {actions_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -207,12 +207,12 @@ def main():
     # PROCESS: gld_inspections.csv
     # ========================================================================
     
-    inspections_file = os.path.join(GLD_INPUT_PATH, "gld_inspections.csv")
-    if os.path.exists(inspections_file):
+    inspections_file = f"{GLD_PREFIX}/gld_inspections.csv"
+    if client.exists(inspections_file):
         print(f"\n📂 Processing: {os.path.basename(inspections_file)}")
         
         try:
-            df = pd.read_csv(inspections_file, dtype=str, low_memory=False)
+            df = client.read_csv(inspections_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -233,7 +233,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(inspections_file, index=False, encoding='utf-8')
+                client.write_csv(df, inspections_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {inspections_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -247,12 +247,12 @@ def main():
     # PROCESS: gld_investigations.csv
     # ========================================================================
     
-    investigations_file = os.path.join(GLD_INPUT_PATH, "gld_investigations.csv")
-    if os.path.exists(investigations_file):
+    investigations_file = f"{GLD_PREFIX}/gld_investigations.csv"
+    if client.exists(investigations_file):
         print(f"\n📂 Processing: {os.path.basename(investigations_file)}")
         
         try:
-            df = pd.read_csv(investigations_file, dtype=str, low_memory=False)
+            df = client.read_csv(investigations_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -273,7 +273,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(investigations_file, index=False, encoding='utf-8')
+                client.write_csv(df, investigations_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {investigations_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -287,12 +287,12 @@ def main():
     # PROCESS: gld_issues.csv
     # ========================================================================
     
-    issues_file = os.path.join(GLD_INPUT_PATH, "gld_issues.csv")
-    if os.path.exists(issues_file):
+    issues_file = f"{GLD_PREFIX}/gld_issues.csv"
+    if client.exists(issues_file):
         print(f"\n📂 Processing: {os.path.basename(issues_file)}")
         
         try:
-            df = pd.read_csv(issues_file, dtype=str, low_memory=False)
+            df = client.read_csv(issues_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -313,7 +313,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(issues_file, index=False, encoding='utf-8')
+                client.write_csv(df, issues_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {issues_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -327,12 +327,12 @@ def main():
     # PROCESS: gld_issues_answers.csv
     # ========================================================================
     
-    issues_answers_file = os.path.join(GLD_INPUT_PATH, "gld_issues_answers.csv")
-    if os.path.exists(issues_answers_file):
+    issues_answers_file = f"{GLD_PREFIX}/gld_issues_answers.csv"
+    if client.exists(issues_answers_file):
         print(f"\n📂 Processing: {os.path.basename(issues_answers_file)}")
         
         try:
-            df = pd.read_csv(issues_answers_file, dtype=str, low_memory=False)
+            df = client.read_csv(issues_answers_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -351,7 +351,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(issues_answers_file, index=False, encoding='utf-8')
+                client.write_csv(df, issues_answers_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {issues_answers_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -359,9 +359,9 @@ def main():
                 print(f"   ⚠️ 'task_status_id' column not found. Attempting to join with gld_issues.csv...")
                 
                 # Try to join with gld_issues.csv on a common key
-                issues_file_join = os.path.join(GLD_INPUT_PATH, "gld_issues.csv")
-                if os.path.exists(issues_file_join):
-                    df_issues = pd.read_csv(issues_file_join, dtype=str, low_memory=False)
+                issues_file_join = f"{GLD_PREFIX}/gld_issues.csv"
+                if client.exists(issues_file_join):
+                    df_issues = client.read_csv(issues_file_join, dtype=str, low_memory=False)
                     
                     # Find a common key: try 'task_unique_id' or '_ParentID'
                     join_key = None
@@ -390,7 +390,7 @@ def main():
                                 print(f"      {status}: {count} rows")
                             
                             # Save back
-                            df_merged.to_csv(issues_answers_file, index=False, encoding='utf-8')
+                            client.write_csv(df_merged, issues_answers_file, index=False, encoding='utf-8')
                             print(f"   ✅ Saved to: {issues_answers_file}")
                             total_processed += len(df_merged)
                             tables_processed += 1
@@ -410,12 +410,12 @@ def main():
     # PROCESS: rp2_incidents.csv (in REP folder)
     # ========================================================================
     
-    incidents_file = os.path.join(REP_INPUT_PATH, "rp2_incidents.csv")
-    if os.path.exists(incidents_file):
+    incidents_file = f"{REP_PREFIX}/rp2_incidents.csv"
+    if client.exists(incidents_file):
         print(f"\n📂 Processing: {os.path.basename(incidents_file)}")
         
         try:
-            df = pd.read_csv(incidents_file, dtype=str, low_memory=False)
+            df = client.read_csv(incidents_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -436,7 +436,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(incidents_file, index=False, encoding='utf-8')
+                client.write_csv(df, incidents_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {incidents_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -450,12 +450,12 @@ def main():
     # PROCESS: rp2_site_reports.csv (in REP folder) - uses inspection logic
     # ========================================================================
     
-    site_reports_file = os.path.join(REP_INPUT_PATH, "rp2_site_reports.csv")
-    if os.path.exists(site_reports_file):
+    site_reports_file = f"{REP_PREFIX}/rp2_site_reports.csv"
+    if client.exists(site_reports_file):
         print(f"\n📂 Processing: {os.path.basename(site_reports_file)}")
         
         try:
-            df = pd.read_csv(site_reports_file, dtype=str, low_memory=False)
+            df = client.read_csv(site_reports_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -476,7 +476,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(site_reports_file, index=False, encoding='utf-8')
+                client.write_csv(df, site_reports_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {site_reports_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -490,12 +490,12 @@ def main():
     # PROCESS: rp2_QSET_reports.csv (in REP folder) - uses inspection logic
     # ========================================================================
     
-    qset_reports_file = os.path.join(REP_INPUT_PATH, "rp2_QSET_reports.csv")
-    if os.path.exists(qset_reports_file):
+    qset_reports_file = f"{REP_PREFIX}/rp2_QSET_reports.csv"
+    if client.exists(qset_reports_file):
         print(f"\n📂 Processing: {os.path.basename(qset_reports_file)}")
         
         try:
-            df = pd.read_csv(qset_reports_file, dtype=str, low_memory=False)
+            df = client.read_csv(qset_reports_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -516,7 +516,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(qset_reports_file, index=False, encoding='utf-8')
+                client.write_csv(df, qset_reports_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {qset_reports_file}")
                 total_processed += len(df)
                 tables_processed += 1
@@ -530,12 +530,12 @@ def main():
     # PROCESS: rp2_contracts_managers_audits.csv (in REP folder) - uses inspection logic
     # ========================================================================
     
-    contracts_file = os.path.join(REP_INPUT_PATH, "rp2_contracts_managers_audits.csv")
-    if os.path.exists(contracts_file):
+    contracts_file = f"{REP_PREFIX}/rp2_contracts_managers_audits.csv"
+    if client.exists(contracts_file):
         print(f"\n📂 Processing: {os.path.basename(contracts_file)}")
         
         try:
-            df = pd.read_csv(contracts_file, dtype=str, low_memory=False)
+            df = client.read_csv(contracts_file, dtype=str, low_memory=False)
             print(f"   ✅ Loaded {len(df):,} rows")
             
             if TEST_RUN:
@@ -556,7 +556,7 @@ def main():
                     print(f"      {status}: {count} rows")
                 
                 # Save back
-                df.to_csv(contracts_file, index=False, encoding='utf-8')
+                client.write_csv(df, contracts_file, index=False, encoding='utf-8')
                 print(f"   ✅ Saved to: {contracts_file}")
                 total_processed += len(df)
                 tables_processed += 1

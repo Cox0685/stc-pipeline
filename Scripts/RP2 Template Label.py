@@ -9,18 +9,21 @@ Reads gld_templates.csv and maps template_category and QSET_category to:
 """
 
 import os
+import sys
+import io
 import pandas as pd
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
+GLD_PREFIX = "GLD"
 
-# Create output folder if it doesn't exist
-os.makedirs(GLD_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -32,8 +35,8 @@ TEST_RUN = False
 print("=" * 80)
 print("⚔️  MAP TEMPLATE CATEGORIES - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (GLD): {GLD_INPUT_PATH}")
-print(f"📁 Output (GLD): {GLD_OUTPUT_PATH}")
+print(f"📁 Input (GLD): ADLS/{GLD_PREFIX}")
+print(f"📁 Output (GLD): ADLS/{GLD_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print("=" * 80)
 
@@ -46,14 +49,14 @@ def main():
     # STEP 1: Read gld_templates.csv (the mapping source)
     # ========================================================================
     
-    templates_file = os.path.join(GLD_INPUT_PATH, "gld_templates.csv")
+    templates_file = f"{GLD_PREFIX}/gld_templates.csv"
     
-    if not os.path.exists(templates_file):
+    if not client.exists(templates_file):
         print(f"❌ templates file not found: {templates_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(templates_file)}")
-    df_templates = pd.read_csv(templates_file, dtype=str, low_memory=False)
+    print(f"\n📂 Reading: {templates_file}")
+    df_templates = client.read_csv(templates_file, dtype=str, low_memory=False)
     print(f"   ✅ Loaded {len(df_templates):,} rows")
     
     # Check for required columns
@@ -85,11 +88,11 @@ def main():
     # STEP 2: Map to gld_actions.csv (via task_template_id)
     # ========================================================================
     
-    actions_file = os.path.join(GLD_INPUT_PATH, "gld_actions.csv")
+    actions_file = f"{GLD_PREFIX}/gld_actions.csv"
     
-    if os.path.exists(actions_file):
-        print(f"\n📂 Reading: {os.path.basename(actions_file)}")
-        df_actions = pd.read_csv(actions_file, dtype=str, low_memory=False)
+    if client.exists(actions_file):
+        print(f"\n📂 Reading: {actions_file}")
+        df_actions = client.read_csv(actions_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_actions):,} rows")
         
         if TEST_RUN:
@@ -111,8 +114,8 @@ def main():
             print(f"   ✅ Mapped {mapped_count:,} rows with template_category and QSET_category")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_actions.csv")
-            df_actions.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_actions.csv"
+            client.write_csv(df_actions, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'task_template_id' column not found in gld_actions.csv")
@@ -123,11 +126,11 @@ def main():
     # STEP 3: Map to gld_inspections.csv (via template_id)
     # ========================================================================
     
-    inspections_file = os.path.join(GLD_INPUT_PATH, "gld_inspections.csv")
+    inspections_file = f"{GLD_PREFIX}/gld_inspections.csv"
     
-    if os.path.exists(inspections_file):
-        print(f"\n📂 Reading: {os.path.basename(inspections_file)}")
-        df_inspections = pd.read_csv(inspections_file, dtype=str, low_memory=False)
+    if client.exists(inspections_file):
+        print(f"\n📂 Reading: {inspections_file}")
+        df_inspections = client.read_csv(inspections_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_inspections):,} rows")
         
         if TEST_RUN:
@@ -149,8 +152,8 @@ def main():
             print(f"   ✅ Mapped {mapped_count:,} rows with template_category and QSET_category")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_inspections.csv")
-            df_inspections.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_inspections.csv"
+            client.write_csv(df_inspections, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'template_id' column not found in gld_inspections.csv")
@@ -172,14 +175,14 @@ def main():
     print("-" * 60)
     
     for file in ['gld_actions.csv', 'gld_inspections.csv']:
-        file_path = os.path.join(GLD_OUTPUT_PATH, file)
-        if os.path.exists(file_path):
-            size = os.path.getsize(file_path)
+        file_path = f"{GLD_PREFIX}/{file}"
+        if client.exists(file_path):
             try:
-                df = pd.read_csv(file_path)
-                print(f"   {file:<35} | {len(df):>6} rows | {len(df.columns):>3} cols | {size:>10,} bytes")
-            except:
-                print(f"   {file:<35} | {size:>10,} bytes")
+                raw = client.read_bytes(file_path)
+                df = pd.read_csv(io.BytesIO(raw))
+                print(f"   {file:<35} | {len(df):>6} rows | {len(df.columns):>3} cols | {len(raw):>10,} bytes")
+            except Exception:
+                print(f"   {file:<35} | (could not read for summary)")
         else:
             print(f"   {file:<35} | NOT CREATED")
 

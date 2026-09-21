@@ -2,12 +2,14 @@
 # coding: utf-8
 
 """
-STC Table Merge - Local Version (Keep DROP_TABLE, but NO column drops on kept tables)
-Reads from SLV folder, transforms/merges data, outputs to GLD folder
+STC Table Merge - Azure Version (Keep DROP_TABLE, but NO column drops on kept tables)
+Reads from the SLV tier in ADLS, transforms/merges data, writes to the GLD tier.
 """
 
 import os
 import sys
+import io
+import json
 import pandas as pd
 import re
 from datetime import datetime
@@ -20,11 +22,10 @@ import azure_io
 # CONFIGURATION
 # ============================================================================
 
-# Data lake folder names (was a local OneDrive path)
-SLV_INPUT_PATH = "SLV"
-GLD_OUTPUT_PATH = "GLD"
+SLV_PREFIX = "SLV"
+GLD_PREFIX = "GLD"
 
-_adls = azure_io.get_client()
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -36,6 +37,12 @@ TEST_RUN = False
 # ============================================================================
 # TABLE TOGGLES - True = process this table, False = skip it
 # ============================================================================
+# NOTE: what actually drives which tables get processed is
+# lv3_transformation_config.keys() below (execute_transformations() loops
+# over that, not this dict) - a table missing from lv3_transformation_config
+# entirely is never processed, regardless of what's set here. This dict's
+# toggles.get(table_name, True) defaults to enabled, so a table present in
+# lv3_transformation_config but missing from here still runs.
 
 TABLE_TOGGLES = {
     "actions_feed": True,
@@ -44,13 +51,15 @@ TABLE_TOGGLES = {
     "audits_search": True,
     "groups_list": True,
     "groups_users": True,
+    "headsup_list": True,
+    "headsup_users": True,
     "incidents_details": True,
     "incidents_feed": True,
     "inspections_answers": True,
     "inspections_answers_flattened": True,
     "issues_details": True,
     "issues_list": True,
-    "issues_question_answers": True,
+    "issues_answers": True,
     "schedule_items": True,
     "site_members": True,
     "sites_list": True,
@@ -59,6 +68,28 @@ TABLE_TOGGLES = {
     "user_groups": True,
     "users_feed": True
 }
+
+# Runtime override from STC Pipeline Runner.py (optional) - see the matching
+# block in STC JSON Map and Clean.py for the full explanation. Falls back to
+# TABLE_TOGGLES as written when run standalone.
+_table_overrides_raw = os.environ.get("TABLE_ENABLED_OVERRIDES")
+if _table_overrides_raw:
+    try:
+        _table_overrides = json.loads(_table_overrides_raw)
+        _applied = 0
+        _unmatched = []
+        for _table_name, _enabled in _table_overrides.items():
+            if _table_name in TABLE_TOGGLES:
+                TABLE_TOGGLES[_table_name] = _enabled
+                _applied += 1
+            else:
+                _unmatched.append(_table_name)
+        print(f"🔧 Applied {_applied} table toggle override(s) from Pipeline Runner")
+        if _unmatched:
+            print(f"   ℹ️ {len(_unmatched)} override(s) had no matching key here (fine if this "
+                  f"stage doesn't produce that table): {_unmatched}")
+    except Exception as e:
+        print(f"⚠️ Could not parse TABLE_ENABLED_OVERRIDES - ignoring, using TABLE_TOGGLES as written: {e}")
 
 # ============================================================================
 # TRANSFORMATION CONFIGURATION
@@ -121,6 +152,21 @@ lv3_transformation_config = {
                 "return_column": "name"
             }
         ]
+    },
+    "headsup_list": {
+        "status": "KEEP_AND_TRANSFORM",
+        "target_table": "gld_headsup",
+        # No join to headsup_users yet - deliberately not guessing a join
+        # key/column name here. Once a real run has populated SLV, check
+        # headsup_list's actual columns (likely something like "title" or
+        # "id") and headsup_users' _ParentID, then add a join the same way
+        # groups_users joins back to groups_list above.
+        "joins": []
+    },
+    "headsup_users": {
+        "status": "KEEP_AND_TRANSFORM",
+        "target_table": "gld_headsup_users",
+        "joins": []
     },
     "incidents_details": {
         "status": "DROP_TABLE",  # Dropped - not needed
@@ -212,8 +258,8 @@ lv3_transformation_config = {
 print("=" * 80)
 print("⚔️  STC TABLE MERGE - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (SLV): {SLV_INPUT_PATH}")
-print(f"📁 Output (GLD): {GLD_OUTPUT_PATH}")
+print(f"📁 Input (SLV): ADLS/{SLV_PREFIX}")
+print(f"📁 Output (GLD): ADLS/{GLD_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 if TEST_RUN:
     print(f"   📊 Test Limit: 10 rows per table")
@@ -239,25 +285,44 @@ print("=" * 80)
 
 def write_large_dataframe(df: pd.DataFrame, output_file: str, chunk_size: int = 1000):
     """
-    Write a DataFrame to the data lake.
+    Write a large DataFrame to the data lake in chunks.
 
-    The original local-disk version chunked this write (mode='a' per chunk)
-    specifically to avoid a MemoryError building one giant local file
-    write - azure_io.write_csv() uploads the whole thing as one blob in a
-    single call, since the DataFrame is already fully in memory by this
-    point regardless of how the write itself is chunked. This is simpler
-    and was fine in testing; if a genuinely huge table ever causes memory
-    pressure building the CSV string, that's the thing to revisit, not the
-    chunking of the HTTP upload itself.
+    HONEST CAVEAT vs the local-disk version: a real local file handle lets
+    each chunk get written straight to disk and then forgotten, keeping
+    only one chunk's worth of CSV text in memory at a time. Blob storage
+    has no equivalent true streaming-append here (azure_io's write is one
+    upload_blob call) - so the full CSV text still has to exist in memory
+    before that one upload happens. This still limits PEAK memory during
+    the CSV-generation step itself (building the string chunk by chunk
+    rather than one huge df.to_csv() call in one go), which is the part
+    most likely to spike, but it is not the same guarantee the local
+    version had. If a table's true row/column volume ever threatens
+    Container App Job memory limits even with this, the real fix is
+    switching this path to a genuine blob block-upload (uploading each
+    chunk as its own committed block, then committing the blob once) -
+    not implemented here as it wasn't needed for anything this pipeline
+    currently produces.
     """
     total_rows = len(df)
     total_cols = len(df.columns)
-    print(f"   💾 Writing {total_rows} rows with {total_cols} columns...")
-
-    _adls.write_csv(df, output_file, index=False, encoding='utf-8')
-
-    print(f"   ✅ Written {total_rows:,} rows")
-
+    print(f"   💾 Writing {total_rows} rows with {total_cols} columns in chunks of {chunk_size}...")
+    
+    buf = io.StringIO()
+    header_written = False
+    
+    for i in range(0, total_rows, chunk_size):
+        chunk = df.iloc[i:i+chunk_size]
+        header = not header_written
+        
+        chunk.to_csv(buf, header=header, index=False, encoding='utf-8')
+        header_written = True
+        
+        # Show progress periodically
+        if (i + chunk_size) % 5000 == 0 or i == 0:
+            written_so_far = min(i + chunk_size, total_rows)
+            print(f"      📦 Built {written_so_far:,} / {total_rows:,} rows")
+    
+    client.write_bytes(buf.getvalue().encode('utf-8'), output_file)
     print(f"   ✅ Complete: {total_rows:,} rows written to {output_file}")
 
 
@@ -357,11 +422,11 @@ def execute_transformations(config: Dict, toggles: Dict, test_run: bool = False)
             print(f"   ⏭️ Skipping {table_name} (disabled in TABLE_TOGGLES)")
             continue
             
-        input_file = f"{SLV_INPUT_PATH}/{table_name}.csv"
+        input_file = f"{SLV_PREFIX}/{table_name}.csv"
         try:
-            if _adls.exists(input_file):
+            if client.exists(input_file):
                 # Suppress mixed type warnings by reading all as string
-                df = _adls.read_csv(input_file, dtype=str, low_memory=False)
+                df = client.read_csv(input_file, dtype=str, low_memory=False)
                 if test_run and not df.empty:
                     df = df.head(10)
                 all_dfs[table_name] = df
@@ -441,17 +506,15 @@ def execute_transformations(config: Dict, toggles: Dict, test_run: bool = False)
         
         print(f"   -> Final columns: {len(df.columns)} (ALL preserved)")
         
-        # Step C: Save to GLD folder (chunk threshold kept for logging parity;
-        # write_large_dataframe now writes in one call either way - see its
-        # docstring for why)
-        output_file = f"{GLD_OUTPUT_PATH}/{target_table_name}.csv"
+        # Step C: Save to GLD tier with chunked writing for large dataframes
+        output_file = f"{GLD_PREFIX}/{target_table_name}.csv"
         
         # Use chunked writing if dataframe has many columns or rows
         # This prevents MemoryError when saving large/wide dataframes
         if len(df.columns) > 500 or len(df) > 100000:
             write_large_dataframe(df, output_file, chunk_size=1000)
         else:
-            _adls.write_csv(df, output_file, index=False, encoding='utf-8')
+            client.write_csv(df, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved {target_table_name} ({len(df)} rows, {len(df.columns)} columns)")
         
         transformed_results[target_table_name] = df
@@ -474,18 +537,20 @@ def main():
     print(f"📅 Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     
-    # Show summary of GLD folder
+    # Show summary of GLD tier
     print("\n📋 GLD Output Files:")
     print("-" * 70)
     
     for table_name in transformed_tables.keys():
-        output_file = f"{GLD_OUTPUT_PATH}/{table_name}.csv"
-        if _adls.exists(output_file):
+        output_file = f"{GLD_PREFIX}/{table_name}.csv"
+        if client.exists(output_file):
             try:
-                df = _adls.read_csv(output_file)
-                print(f"   {table_name:<35} | {len(df):>6} rows | {len(df.columns):>3} cols")
-            except:
-                print(f"   {table_name:<35} | (exists, could not read for summary)")
+                raw = client.read_bytes(output_file)
+                size = len(raw)
+                df = pd.read_csv(io.BytesIO(raw))
+                print(f"   {table_name:<35} | {len(df):>6} rows | {len(df.columns):>3} cols | {size:>10,} bytes")
+            except Exception:
+                print(f"   {table_name:<35} | (could not read for summary)")
         else:
             print(f"   {table_name:<35} | NOT CREATED")
     
@@ -500,12 +565,12 @@ def main():
             print(f"   ❌ {table_name:<30} | DROPPED")
         else:
             target = config.get("target_table", f"gld_{table_name}")
-            output_file = f"{GLD_OUTPUT_PATH}/{target}.csv"
-            if _adls.exists(output_file):
+            output_file = f"{GLD_PREFIX}/{target}.csv"
+            if client.exists(output_file):
                 try:
-                    df = _adls.read_csv(output_file)
+                    df = client.read_csv(output_file)
                     print(f"   ✅ {table_name:<30} | KEPT -> {target} ({len(df.columns)} columns)")
-                except:
+                except Exception:
                     print(f"   ✅ {table_name:<30} | KEPT -> {target}")
             else:
                 print(f"   ⚠️ {table_name:<30} | KEPT but file not found")

@@ -1,0 +1,265 @@
+name: Run STC Pipeline (TNS through GLD, REP, and Tables, scheduled)
+
+# Runs the full ingestion + transform + reporting chain directly on a
+# GitHub-hosted runner, on a schedule - no Azure RBAC/managed identity
+# needed at all. Uses the same storage key auth already proven locally,
+# plus the SafetyCulture API key, both as GitHub secrets (not baked into
+# the code).
+#
+# This is a genuine stopgap, not the final architecture: no Log Analytics
+# integration, no managed identity, secrets live in GitHub instead of Key
+# Vault. It exists to get real automated runs happening today instead of
+# waiting on the RBAC grant from IT. Once that comes through, the Container
+# App Job (infra/main.bicep) is still the intended long-term home for this -
+# migrate back to it then, rather than running two automation paths forever.
+#
+# SCOPE: now covers the full pipeline - TNS (raw) -> BNZ -> SLV -> GLD
+# (bronze/silver/gold), then the reporting stage (REP, via the RP1/RP2/RP3
+# scripts), then the final delivery stage (RP4, writing into TABLES - the
+# ADLS equivalent of the local SHEQ Portal's assets/tables folder, the
+# pipeline's actual delivery point for the front-end web app).
+#
+# STAGE ORDER: this matches STC Pipeline Runner.py's local stage order
+# exactly. One thing worth flagging specifically: Date Scrape MUST run
+# BEFORE Table Merge, not after - Date Scrape splits date+time columns in
+# SLV; Table Merge copies SLV -> GLD. Run Table Merge first and GLD gets
+# built from un-split SLV, and every "_time" column silently never makes
+# it into GLD at all. The very first version of this workflow had these
+# two steps the wrong way round - fixed here.
+#
+# Steps run in sequence and each depends on the previous one's output -
+# GitHub Actions stops the job automatically if any step fails, so a bad
+# run at any stage won't silently feed garbage into later stages.
+
+on:
+  workflow_dispatch: # manual "Run workflow" button, for testing this before trusting the schedule
+  schedule:
+    - cron: '0 2 * * *' # daily 02:00 UTC - adjust once you know real run duration
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r infra/requirements.txt
+
+      # ======================================================================
+      # STC CORE: TNS -> BNZ -> SLV -> GLD
+      # ======================================================================
+
+      - name: Stage 1 - Ingest from SafetyCulture (-> TNS)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+          SAFETYCULTURE_API_KEY: ${{ secrets.SAFETYCULTURE_API_KEY }}
+        run: python "STC API IN.py"
+
+      - name: Stage 2 - Flatten JSON (TNS -> BNZ)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "STC JSON Map and Clean.py"
+
+      - name: Stage 3 - Clean and standardize (BNZ -> SLV)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "STC Data Clean.py"
+
+      - name: Stage 4 - Split date/time columns (in-place on SLV)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "STC Date Scrape.py"
+
+      - name: Stage 5 - Merge tables (SLV -> GLD)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "STC Table Merge.py"
+
+      # ======================================================================
+      # RP1: FIRST-PASS REPORTS FROM SLV (-> REP)
+      # ======================================================================
+
+      - name: Stage 6 - RP1 ESG Report (SLV -> REP)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP1 ESG Report.py"
+
+      - name: Stage 7 - RP1 Issues Answers (SLV -> GLD)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP1 Issues Answers.py"
+
+      # ======================================================================
+      # MAP: LABEL/STATUS ENRICHMENT ON GLD (IN PLACE)
+      # ======================================================================
+
+      - name: Stage 8 - MAP Status Logic
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "MAP Status Logic.py"
+
+      - name: Stage 9 - MAP Template Labels
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "MAP Template Labels.py"
+
+      - name: Stage 10 - MAP Template QSET Labels
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "MAP Template QSET Labels.py"
+
+      - name: Stage 11 - MAP User Groups
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "MAP User Groups.py"
+
+      # ======================================================================
+      # RP2: SECOND-PASS REPORTS (GLD -> REP)
+      # ======================================================================
+
+      - name: Stage 12 - RP2 Site Status Pull
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 Site Status Pull.py"
+
+      - name: Stage 13 - RP2 Template Label
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 Template Label.py"
+
+      - name: Stage 14 - RP2 User Label
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 User Label.py"
+
+      - name: Stage 15 - RP2 CM Reports
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 CM Reports.py"
+
+      - name: Stage 16 - RP2 Incidents
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 Incidents.py"
+
+      - name: Stage 17 - RP2 QSET Reports
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 QSET Reports.py"
+
+      - name: Stage 18 - RP2 Site Reports
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 Site Reports.py"
+
+      - name: Stage 19 - RP2 HeadsUp
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP2 heads Up.py"
+
+      # ======================================================================
+      # RP3: THIRD-PASS REPORTS (REP -> REP; reports built from other reports)
+      # ======================================================================
+
+      - name: Stage 20 - RP3 Reporting Logic
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP3 Reporting Logic.py"
+
+      - name: Stage 21 - RP3 Metric List
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP3 Metric List.py"
+
+      - name: Stage 22 - RP3 MCL39
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP3 MCL39.py"
+
+      - name: Stage 23 - RP3 Weekly Incident Report
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP3 Weekly Incident Report.py"
+
+      - name: Stage 24 - RP3 Weekly Performance Report
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP3 Weekly Performance Report.py"
+
+      # ======================================================================
+      # RP4: FINAL DELIVERY (GLD/REP -> TABLES, the portal's data source)
+      # ======================================================================
+
+      - name: Stage 25 - RP4 Final Output Execution (GLD/REP -> Tables)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        run: python "RP4 GLD to TLB.py"
+
+      - name: Stage 26 - RP4 Site and User Data (-> Tables)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        # NOTE: this stage reads a monthly staff timesheet that a human has
+        # to have dropped into TNS as "*Monthly Staff Timesheet.xlsx"
+        # sometime that month (see find_latest_timesheet() in the script) -
+        # nothing earlier in this workflow checks that one exists before
+        # getting here. If this step fails with "no file matching pattern
+        # found", that's why - it's not a bug in the workflow, the upload
+        # is a manual step outside this pipeline.
+        run: python "RP4 Site and User Data.py"

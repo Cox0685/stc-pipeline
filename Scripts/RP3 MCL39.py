@@ -2,50 +2,69 @@
 # coding: utf-8
 
 """
-RP2 Metric Pivot Generator
-Reads rp2_metric_list.csv, applies date filters, creates pivot table by site
-Creates Excel with two tabs: 'Metric_Pivot' and 'Site_Totals'
+RP3 MCL39 Generator
+Reads rp2_metric_list.csv, rp2_incidents.csv, and rp1_esg_report.csv directly, applies date filters,
+creates the MCL39 pivot by site, aggregates ESG cards/hours and Incident counts inline, and produces
+the single MCL39 workbook with three tabs: 'MCL39', 'Site_Totals', and 'ESG_Details'.
 
-FIXED (v2):
-- Date parser now tries multiple known formats explicitly, instead of relying
-  on a single strptime + a loose dayfirst=True fallback. The old fallback could
-  silently mis-parse ambiguous strings (or parse ISO dates without you knowing
-  it happened, other than a stray warning).
-- Every row's parsing method is now tracked in a 'Date_Parse_Method' column,
-  so you can see exactly how each date was interpreted.
-- The script now DUMPS every 'Weekly H&S Inspection' row that gets excluded by
-  the date filter to a CSV (weekly_hs_excluded_debug.csv) — raw value, parsed
-  value, and parse method — so you can see precisely why any given row didn't
-  make it into the July window instead of just trusting a total count.
-- End-of-range comparison now includes the full end day (23:59:59) instead of
-  midnight, as a safety net in case any Date_Parsed value ever carries a
-  non-midnight time component.
+UPDATES:
+- Directly ingests Incidents from rp2_incidents.csv.
+- Status UUID mapping (547ed... = Open, 45048... = Resolved).
+- Category mapping to MCL39 columns (Accidents, Near Misses, Security Breaches, etc.).
+- SOR Frequency Rate calculated from (Open SORS + Resolved SORS).
+- Fallback hours applied when Total Site Hours is blank/0.
 """
 
 import os
+import sys
+import io
+import re
 import pandas as pd
 from datetime import datetime, timedelta
+
+# Openpyxl styling imports
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+REP_PREFIX = "REP"
 
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
-# DATE FILTER - UK FORMAT (DD/MM/YYYY)
+# DATE FILTER (Rolling 28-day window with fixed toggle)
 # ============================================================================
 
-DATE_FILTER_START = "01/08/2026"
-DATE_FILTER_END = "31/08/2026"
+USE_ROLLING_WINDOW = True
+ROLLING_DAYS = 28
 
-FILTER_START_DATE = datetime.strptime(DATE_FILTER_START, "%d/%m/%Y")
-# Push end date to the last moment of that day, so any date value that still
-# carries a time component (shouldn't happen post-parsing, but just in case)
-# doesn't get excluded for being "after midnight" on the last day.
-FILTER_END_DATE = datetime.strptime(DATE_FILTER_END, "%d/%m/%Y") + timedelta(hours=23, minutes=59, seconds=59)
+if USE_ROLLING_WINDOW:
+    _now = datetime.now()
+    FILTER_END_DATE = datetime(_now.year, _now.month, _now.day, 23, 59, 59)
+    FILTER_START_DATE = (FILTER_END_DATE - timedelta(days=ROLLING_DAYS)).replace(hour=0, minute=0, second=0)
+    DATE_FILTER_START = FILTER_START_DATE.strftime("%Y-%m-%d")
+    DATE_FILTER_END = FILTER_END_DATE.strftime("%Y-%m-%d")
+else:
+    DATE_FILTER_START = "2026-08-01"
+    DATE_FILTER_END = "2026-08-31"
+    FILTER_START_DATE = datetime.strptime(DATE_FILTER_START, "%Y-%m-%d")
+    FILTER_END_DATE = datetime.strptime(DATE_FILTER_END, "%Y-%m-%d") + timedelta(hours=23, minutes=59, seconds=59)
+
+# ============================================================================
+# SOR FREQUENCY RATE CONFIGURATION
+# ============================================================================
+SOR_RATE_MULTIPLIER = 1_000
+
+FALLBACK_STAFF = 561
+FALLBACK_HOURS_PER_WEEK = 45
+FALLBACK_WEEKS = 4
+FALLBACK_SITES = 31
 
 # ============================================================================
 # METRICS EXCLUDED FROM DATE FILTERING (ALL TIME)
@@ -55,72 +74,169 @@ EXCLUDED_FROM_DATE_FILTER = [
     "Overdue Safety",
     "Overdue Environmental",
     "Overdue Quality",
+    "Overdue Uncategorized",
+    "Overdue Non QSET",
 ]
 
 # ============================================================================
-# FINAL METRICS (columns to display) - WITHOUT "Count"
+# SECTION DEFINITIONS & COLOR THEMES
 # ============================================================================
 
-FINAL_METRICS = [
-    # Site Reports
-    "SubCon Audits",
-    "Weekly HS Inspection",
-    "Work Area Inspections",
+SECTIONS = [
+    {
+        "name": "Site",
+        "columns": ["Site Name"],
+        "header_color": "1B2631",
+        "total_color": "E5E7E9",
+    },
+    {
+        "name": "Audits & Inspections",
+        "columns": [
+            "SubCon Audits",
+            "Weekly HS Inspection",
+            "Work Area Inspections",
+            "Site Setup Audit",
+            "Site Shut Down Audit",
+            "Total Audits & Inspections",
+        ],
+        "header_color": "2F5597",
+        "total_color": "D9E1F2",
+    },
+    {
+        "name": "Actions",
+        "columns": [
+            "Overdue Quality Action",
+            "Overdue Environmental Action",
+            "Overdue Safety Action",
+            "Overdue Non QSET Action",
+            "Total Overdue Actions",
+            "Total Resolved Actions",
+        ],
+        "header_color": "C65911",
+        "total_color": "FCE4D6",
+    },
+    {
+        "name": "SORs",
+        "columns": [
+            "Env SOR Neg",
+            "Env SOR Pos",
+            "Safety SOR Neg",
+            "Safety SOR Pos",
+            "SOR Frequency Rate",
+            "Open SORS",
+            "Resolved SORS",
+        ],
+        "header_color": "008080",
+        "total_color": "E0F2F1",
+    },
+    {
+        "name": "Incidents",
+        "columns": [
+            "Accidents",
+            "Environmental Incidents",
+            "Near Misses",
+            "Property Damage",
+            "Security Breaches",
+            "Service Strikes",
+            "Total Incidents",
+        ],
+        "header_color": "A61C1C",
+        "total_color": "FADBD8",
+    },
+    {
+        "name": "Leadership",
+        "columns": [
+            "Contracts Managers Audits",
+            "Senior Leadership Visits",
+            "Total Leadership Reports",
+        ],
+        "header_color": "7030A0",
+        "total_color": "E8DAEF",
+    },
+    {
+        "name": "QSET",
+        "columns": [
+            "QSET Environmental",
+            "QSET HS Inspection",
+            "QSET Quality Inspections",
+            "Total QSET",
+        ],
+        "header_color": "375623",
+        "total_color": "E2EFDA",
+    },
+    {
+        "name": "ESG",
+        "columns": [
+            "Weekly ESG Reports",
+            "DA Tests Conducted",
+            "DA Test Failures",
+            "Red Cards Issued",
+            "Yellow Cards Issued",
+            "Total Site Hours",
+        ],
+        "header_color": "3A4B5C",
+        "total_color": "D6DBDF",
+    },
+]
 
-    # Overdue
-    "Overdue Quality Action",
-    "Overdue Environmental Action",
-    "Overdue Safety Action",
+MCL39_COLUMNS = [col for sec in SECTIONS[1:] for col in sec["columns"]]
 
-    # SORs
-    "Env SOR Neg",
-    "Env SOR Pos",
-    "Safety SOR Neg",
-    "Safety SOR Pos",
-    "SOR Frequency Rate",
-
-    # SOR Totals
-    "Open SORS",
-    "Resolved SORS",
-
-    # Incident Types
+INCIDENT_COLUMNS = [
     "Accidents",
     "Environmental Incidents",
     "Near Misses",
     "Property Damage",
     "Security Breaches",
     "Service Strikes",
+]
 
-    # Contracts Managers
+BASE_PIVOT_METRICS = [
+    "SubCon Audits",
+    "Weekly HS Inspection",
+    "Work Area Inspections",
+    "Site Setup Audit",
+    "Site Shut Down Audit",
+    "Overdue Quality Action",
+    "Overdue Environmental Action",
+    "Overdue Safety Action",
+    "Overdue Non QSET Action",
+    "Env SOR Neg",
+    "Env SOR Pos",
+    "Safety SOR Neg",
+    "Safety SOR Pos",
+    "SOR Frequency Rate",
+    "Open SORS",
+    "Resolved SORS",
+    "Accidents",
+    "Environmental Incidents",
+    "Near Misses",
+    "Property Damage",
+    "Security Breaches",
+    "Service Strikes",
     "Contracts Managers Audits",
-
-    # Placeholder
     "Senior Leadership Visits",
-
-    # QSET
     "QSET Environmental",
     "QSET HS Inspection",
     "QSET Quality Inspections",
 ]
 
 # ============================================================================
-# METRIC MAPPING - Maps original metrics to final column names
+# METRIC MAPPING FOR AUDITS / ACTIONS / SORS
 # ============================================================================
 
 METRIC_MAPPING = {
-    # Site Reports
     "SubCon Audits": "SubCon Audits",
     "Weekly H&S Inspection": "Weekly HS Inspection",
     "Work Area Inspections": "Work Area Inspections",
-    "Site Setup Audit": "DROP",
+    "Site Setup Audit": "Site Setup Audit",
+    "Site Shut Down Audit": "Site Shut Down Audit",
 
-    # Overdue
     "Overdue Quality": "Overdue Quality Action",
     "Overdue Environmental": "Overdue Environmental Action",
     "Overdue Safety": "Overdue Safety Action",
-    "Overdue Uncategorized": "DROP",
+    "Overdue Uncategorized": "Overdue Non QSET Action",
+    "Overdue Non QSET": "Overdue Non QSET Action",
 
-    # SORs - Negative/Positive by type (Open + Resolved combined)
     "Open ENV -": "Env SOR Neg",
     "Resolved ENV -": "Env SOR Neg",
     "Open ENV +": "Env SOR Pos",
@@ -130,31 +246,37 @@ METRIC_MAPPING = {
     "Open SOR +": "Safety SOR Pos",
     "Resolved SOR +": "Safety SOR Pos",
 
-    # Incident Types
-    "Open Accident (Personal Injury)": "Accidents",
-    "Resolved Accident (Personal Injury)": "Accidents",
-    "Open Environmental Incident": "Environmental Incidents",
-    "Resolved Environmental Incident": "Environmental Incidents",
-    "Open Near Miss / Unplanned Event": "Near Misses",
-    "Resolved Near Miss / Unplanned Event": "Near Misses",
-    "Property Damage": "Property Damage",
-    "Security Breaches": "Security Breaches",
-    "Service Strikes": "Service Strikes",
-
-    # Contracts Managers
     "Contracts Managers Audits": "Contracts Managers Audits",
-
-    # QSET
     "QSET Environmental": "QSET Environmental",
     "QSET H&S Inspection": "QSET HS Inspection",
     "QSET Quality Inspections": "QSET Quality Inspections",
 
-    # Resolved Actions - KEEP AS SEPARATE METRICS FOR SITE TOTALS
     "Resolved Safety": "Resolved Safety",
     "Resolved Quality": "Resolved Quality",
     "Resolved Environmental": "Resolved Environmental",
+    "Resolved Non QSET": "Resolved Non QSET",
+    "Resolved Uncategorized": "Resolved Non QSET",
 
-    # DROP these
+    # Ignore incidents in metric_list since they are sourced from rp2_incidents.csv
+    "Open Accident (Personal Injury)": "DROP",
+    "Resolved Accident (Personal Injury)": "DROP",
+    "Accidents": "DROP",
+    "Open Environmental Incident": "DROP",
+    "Resolved Environmental Incident": "DROP",
+    "Environmental Incidents": "DROP",
+    "Open Near Miss / Unplanned Event": "DROP",
+    "Resolved Near Miss / Unplanned Event": "DROP",
+    "Near Misses": "DROP",
+    "Open Property Damage": "DROP",
+    "Resolved Property Damage": "DROP",
+    "Property Damage": "DROP",
+    "Open Security Breaches": "DROP",
+    "Resolved Security Breaches": "DROP",
+    "Security Breaches": "DROP",
+    "Open Service Strikes": "DROP",
+    "Resolved Service Strikes": "DROP",
+    "Service Strikes": "DROP",
+
     "Open Safety": "DROP",
     "Open Quality": "DROP",
     "Open nan": "DROP",
@@ -162,61 +284,104 @@ METRIC_MAPPING = {
     "Open 007 QUALITY - WORK REMEDIATION": "DROP",
     "Open 999 - TEST * DO NOT USE *  INCIDENT REPORT": "DROP",
     "Overdue nan": "DROP",
-    "Resolved Non QSET": "DROP",
-    "Resolved Uncategorized": "DROP",
     "Resolved nan": "DROP",
     "Resolved 005 INCIDENT REPORT": "DROP",
     "Resolved 007 QUALITY - WORK REMEDIATION": "DROP",
 }
 
-# ============================================================================
-# METRIC LISTS FOR CALCULATIONS
-# ============================================================================
-
 OPEN_SOR_METRICS = ["Open SOR +", "Open SOR -", "Open ENV +", "Open ENV -"]
 RESOLVED_SOR_METRICS = ["Resolved SOR +", "Resolved SOR -", "Resolved ENV +", "Resolved ENV -"]
 
-# Resolved Actions source metrics (for Site Totals)
-RESOLVED_ACTIONS_METRICS = ["Resolved Safety", "Resolved Quality", "Resolved Environmental"]
-
-# Metrics that should ALWAYS be 0 (placeholders)
 PLACEHOLDER_METRICS = [
-    "SOR Frequency Rate",
     "Senior Leadership Visits",
-    "Property Damage",
-    "Security Breaches",
-    "Service Strikes",
 ]
 
 # ============================================================================
-# ROBUST DATE PARSER - tries multiple explicit formats, tracks which one hit
+# INCIDENTS SOURCE CONFIGURATION (rp2_incidents.csv)
 # ============================================================================
 
-# Add/remove formats here if you spot others in the debug CSV.
+INCIDENT_STATUS_MAP = {
+    "547ed6465e344732bb54a199d304368a": "Open",
+    "450484b156cd47849b49a3cf97d0c0ad": "Resolved",
+}
+
+INCIDENT_CATEGORY_MAP = {
+    "accident": "Accidents",
+    "security": "Security Breaches",
+    "near miss": "Near Misses",
+    "property": "Property Damage",
+    "environmental": "Environmental Incidents",
+    "service": "Service Strikes",
+}
+
+# ============================================================================
+# ESG CONFIGURATION
+# ============================================================================
+
+ESG_COLUMNS = [
+    'Weekly ESG Reports',
+    'DA Tests Conducted',
+    'DA Test Failures',
+    'Red Cards Issued',
+    'Yellow Cards Issued',
+    'Total Site Hours'
+]
+
+ESG_DETAILS_COLUMNS = [
+    'client_site',
+    'Agency/Subbie',
+    'Client Reps',
+    'Delivery Drivers',
+    'Ext Plant',
+    'Others',
+    'Staff/Ops',
+    'Sub Con Personnel',
+    'Visitors',
+    'Total Hours',
+    'Yellow Cards Issued',
+    'Red Cards Issued',
+    'Cards Issued',
+    'D&A Tests',
+    'D&A Fails'
+]
+
+ESG_QUESTION_MAP = {
+    "Total Weekly Hours for all Labour Only Sub Contractors & Agency staff (Inc. Cleaners)": "agency",
+    "Total Weekly Hours for all Client Representatives, & appointed Contractors Personnel": "client_reps",
+    "Total Weekly Hours for all Delivery Drivers": "delivery_drivers",
+    "Total Weekly Hours for all External Plant Hire (operators)": "ext_plant",
+    "Total Weekly Hours for others that have not been accounted for in the above submissions": "others",
+    "Total Weekly Hours for all RJM employees (Staff, Operatives and Plant Operators)": "staff_ops",
+    "Total Weekly Hours for all Sub Contractors Personnel": "sub_con",
+    "Total Weekly Hours for all Site Visitors": "visitors",
+    "Number of Yellow Cards Issued": "yellow_cards",
+    "Number of Red Cards Issued": "red_cards",
+    "How many tests were carried out?": "d_a_tests",
+    "Insert number of non-negative results (insert 0 if all persons passed)": "d_a_fails",
+}
+
+# ============================================================================
+# ROBUST DATE PARSER
+# ============================================================================
+
 KNOWN_FORMATS = [
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
     "%d/%m/%Y",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%d",
     "%d-%m-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M",
     "%d-%m-%Y",
+    "%d.%m.%Y %H:%M:%S",
+    "%d.%m.%Y",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
     "%m/%d/%Y %H:%M:%S",
     "%m/%d/%Y %H:%M",
     "%m/%d/%Y",
 ]
 
-
 def parse_date_robust(date_str):
-    """
-    Returns (parsed_timestamp_or_NaT, method_used_str).
-    Tries each format in KNOWN_FORMATS in order (DD/MM/YYYY variants first,
-    since that's the expected UK format). Falls back to pandas' general
-    parser with dayfirst=True only as a last resort, and flags it clearly
-    so you can spot rows that needed it.
-    """
     if pd.isna(date_str):
         return pd.NaT, "NULL_INPUT"
 
@@ -230,16 +395,13 @@ def parse_date_robust(date_str):
         except (ValueError, TypeError):
             continue
 
-    # Excel serial date number (e.g. CSV exported a date as a raw number)
     try:
         serial = float(raw)
-        # Excel's epoch (1899-12-30) — handles the classic 1900 leap-year bug
         parsed = pd.Timestamp("1899-12-30") + pd.to_timedelta(serial, unit="D")
         return parsed, "excel_serial"
     except (ValueError, TypeError):
         pass
 
-    # Last-resort loose parse — flagged so you know it wasn't a clean match
     try:
         parsed = pd.to_datetime(raw, errors="coerce", dayfirst=True)
         if pd.notna(parsed):
@@ -250,180 +412,97 @@ def parse_date_robust(date_str):
     return pd.NaT, "UNPARSEABLE"
 
 
+def parse_date_series(series):
+    results = series.apply(parse_date_robust)
+    parsed = results.apply(lambda x: x[0])
+    method = results.apply(lambda x: x[1])
+    return parsed, method
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def extract_prefix(name):
+    if pd.isna(name):
+        return None
+    match = re.match(r'^(\d+)', str(name).strip())
+    return match.group(1) if match else None
+
+
+def clean_site_name(name):
+    if pd.isna(name):
+        return None
+    name = str(name).strip()
+    name = name.replace('’', "'").replace('‘', "'").replace('"', "'")
+    name = re.sub(r'\([^)]*\)', '', name).strip()
+    name = re.sub(r'[^a-zA-Z0-9\s\'\-]', '', name)
+    name = ' '.join(name.split())
+    name = name.lower()
+    return name
+
+
+def clean_numeric_val(val):
+    if pd.isna(val):
+        return 0.0
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() == "nan":
+        return 0.0
+    cleaned = re.sub(r"[^\d.]", "", val_str)
+    try:
+        return float(cleaned) if cleaned else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
 
 def main():
     print("=" * 80)
-    print("⚔️  RP2 METRIC PIVOT GENERATOR - ROBUST DATE PARSING (v2)")
+    print("⚔️  RP3 MCL39 GENERATOR")
     print("=" * 80)
-    print(f"📅 Date Filter: {DATE_FILTER_START} to {DATE_FILTER_END} (inclusive, full end day)")
-    print(f"   Excluded from date filter: {EXCLUDED_FROM_DATE_FILTER}")
+    mode_str = f"Rolling {ROLLING_DAYS} Days" if USE_ROLLING_WINDOW else "Manual Range"
+    print(f"📅 Date Filter ({mode_str}): {DATE_FILTER_START} to {DATE_FILTER_END} (inclusive)")
     print("=" * 80)
 
-    input_file = os.path.join(REP_OUTPUT_PATH, "rp2_metric_list.csv")
-
-    if not os.path.exists(input_file):
+    # ------------------------------------------------------------------------
+    # 1. READ RP2 METRIC LIST (Inspections, Actions, SORs, Leadership, QSET)
+    # ------------------------------------------------------------------------
+    input_file = f"{REP_PREFIX}/rp2_metric_list.csv"
+    if not client.exists(input_file):
         print(f"❌ Input file not found: {input_file}")
         return
 
-    df = pd.read_csv(input_file, dtype=str, low_memory=False)
+    df = client.read_csv(input_file, dtype=str, low_memory=False)
     print(f"\n📂 Loaded {len(df):,} rows from rp2_metric_list.csv")
 
-    if 'Filter Date' not in df.columns:
-        print(f"\n   ❌ 'Filter Date' column not found!")
-        print(f"   📋 Available columns: {list(df.columns)}")
+    date_column = 'Filter Date' if 'Filter Date' in df.columns else 'Date' if 'Date' in df.columns else None
+    if not date_column:
+        print(f"\n   ❌ No date column found in rp2_metric_list.csv!")
         return
 
-    print(f"\n   ✅ Using 'Filter Date' column for date filtering")
-
-    # ------------------------------------------------------------------
-    # Parse dates with the robust parser, tracking method per row
-    # ------------------------------------------------------------------
-    parsed_results = df['Filter Date'].apply(parse_date_robust)
-    df['Date_Parsed'] = parsed_results.apply(lambda x: x[0])
-    df['Date_Parse_Method'] = parsed_results.apply(lambda x: x[1])
-
-    valid_dates = df['Date_Parsed'].notna().sum()
-    invalid_dates = df['Date_Parsed'].isna().sum()
-
-    print(f"\n   📊 Date parsing results:")
-    print(f"      Valid dates: {valid_dates:,}")
-    print(f"      Invalid dates: {invalid_dates:,}")
-
-    print(f"\n   📊 Parse method breakdown (all rows):")
-    print(df['Date_Parse_Method'].value_counts().to_string())
-
-    if invalid_dates > 0:
-        print(f"\n   ⚠️ Sample invalid dates:")
-        invalid_samples = df[df['Date_Parsed'].isna()]['Filter Date'].head(10).tolist()
-        for sample in invalid_samples:
-            print(f"      {sample!r}")
-
-    # ------------------------------------------------------------------
-    # Check Weekly H&S Inspection specifically
-    # ------------------------------------------------------------------
-    weekly_mask_all = df['Reporting_Metric'] == 'Weekly H&S Inspection'
-    weekly_total = weekly_mask_all.sum()
-    weekly_valid = (weekly_mask_all & df['Date_Parsed'].notna()).sum()
-    weekly_invalid = weekly_total - weekly_valid
-
-    print(f"\n   📊 Weekly H&S Inspection:")
-    print(f"      Total records: {weekly_total}")
-    print(f"      Valid dates: {weekly_valid}")
-    print(f"      Invalid dates: {weekly_invalid}")
-    print(f"\n   📊 Weekly H&S Inspection parse method breakdown:")
-    print(df.loc[weekly_mask_all, 'Date_Parse_Method'].value_counts().to_string())
-
-    # ------------------------------------------------------------------
-    # Apply date filter (with exceptions) + DEBUG DUMP for Weekly H&S
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Applying date filter...")
+    df['Date_Parsed'], _ = parse_date_series(df[date_column])
 
     is_overdue = df['Reporting_Metric'].isin(EXCLUDED_FROM_DATE_FILTER)
     date_mask = (df['Date_Parsed'] >= FILTER_START_DATE) & (df['Date_Parsed'] <= FILTER_END_DATE)
 
-    weekly_before_filter = weekly_total
-    weekly_in_range = (weekly_mask_all & date_mask).sum()
-    weekly_outside = weekly_before_filter - weekly_in_range
-
-    print(f"\n   📊 Weekly H&S Inspection date filter:")
-    print(f"      Total: {weekly_before_filter}")
-    print(f"      In date range: {weekly_in_range}")
-    print(f"      Outside date range: {weekly_outside}")
-
-    # --- DEBUG EXPORT: every Weekly H&S row that got excluded, with the
-    #     exact raw string, parsed value, and parse method used. This is
-    #     the file to open to see WHY any specific row didn't make it in. ---
-    debug_cols = [c for c in ['Site Name', 'Reporting_Metric', 'ID', 'Created At',
-                               'Completed At', 'Filter Date', 'Date_Parsed',
-                               'Date_Parse_Method'] if c in df.columns]
-    weekly_excluded = df.loc[weekly_mask_all & ~date_mask, debug_cols].copy()
-    weekly_excluded = weekly_excluded.sort_values('Date_Parsed', na_position='first')
-
-    debug_file = os.path.join(REP_OUTPUT_PATH, "weekly_hs_excluded_debug.csv")
-    weekly_excluded.to_csv(debug_file, index=False, encoding='utf-8')
-    print(f"\n   🔍 Wrote {len(weekly_excluded):,} excluded Weekly H&S rows to:")
-    print(f"      {debug_file}")
-
-    # Also dump the INCLUDED rows so you can cross-check the count of 65 vs
-    # your own manual list of 74 directly, row by row.
-    weekly_included = df.loc[weekly_mask_all & date_mask, debug_cols].copy()
-    weekly_included = weekly_included.sort_values('Date_Parsed')
-    included_file = os.path.join(REP_OUTPUT_PATH, "weekly_hs_included_debug.csv")
-    weekly_included.to_csv(included_file, index=False, encoding='utf-8')
-    print(f"   🔍 Wrote {len(weekly_included):,} included Weekly H&S rows to:")
-    print(f"      {included_file}")
-
-    # Apply filter
     df_filtered = df[is_overdue | date_mask].copy()
 
-    print(f"\n   📊 After filtering: {len(df_filtered):,} rows")
-
-    overdue_count = df_filtered[df_filtered['Reporting_Metric'].isin(EXCLUDED_FROM_DATE_FILTER)].shape[0]
-    non_overdue_count = df_filtered[~df_filtered['Reporting_Metric'].isin(EXCLUDED_FROM_DATE_FILTER)].shape[0]
-    print(f"      - Overdue metrics (all time): {overdue_count:,} rows")
-    print(f"      - Non-overdue metrics (date range): {non_overdue_count:,} rows")
-
-    if df_filtered.empty:
-        print("\n⚠️ No records after filtering!")
-        return
-
-    # ------------------------------------------------------------------
-    # Apply metric mapping
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Applying metric mapping...")
-
-    dropped_count = 0
-    mapped_count = 0
-
     def map_metric(metric):
-        nonlocal dropped_count, mapped_count
         if metric in METRIC_MAPPING:
             new_metric = METRIC_MAPPING[metric]
-            if new_metric == "DROP":
-                dropped_count += 1
-                return None
-            if new_metric != metric:
-                mapped_count += 1
-            return new_metric
+            return None if new_metric == "DROP" else new_metric
         return metric
 
     df_filtered['Mapped_Metric'] = df_filtered['Reporting_Metric'].apply(map_metric)
     df_filtered = df_filtered[df_filtered['Mapped_Metric'].notna()].copy()
-
-    print(f"\n   📊 After mapping:")
-    print(f"      - Dropped rows: {dropped_count:,}")
-    print(f"      - Mapped rows: {mapped_count:,}")
-    print(f"      - Remaining rows: {len(df_filtered):,}")
-
-    if df_filtered.empty:
-        print("\n⚠️ No records after mapping!")
-        return
-
     df_filtered = df_filtered.dropna(subset=['Site Name', 'Mapped_Metric'])
-    print(f"\n   After removing nulls: {len(df_filtered):,} rows")
 
-    if df_filtered.empty:
-        print("\n⚠️ No records after removing nulls!")
-        return
-
-    # ------------------------------------------------------------------
-    # Create pivot table
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Creating pivot table...")
-
+    # Pivot table creation for base non-incident metrics
     pivot_df = df_filtered.groupby(['Site Name', 'Mapped_Metric']).size().reset_index(name='Count')
     pivot_table = pivot_df.pivot(index='Site Name', columns='Mapped_Metric', values='Count').fillna(0).astype(int)
-
-    weekly_in_pivot = pivot_table['Weekly HS Inspection'].sum() if 'Weekly HS Inspection' in pivot_table.columns else 0
-    print(f"\n   📊 Weekly HS Inspection in pivot: {weekly_in_pivot}")
-
-    # ------------------------------------------------------------------
-    # Calculate Open SORS and Resolved SORS
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Calculating Open SORS and Resolved SORS...")
 
     def map_for_totals(metric):
         if metric in METRIC_MAPPING:
@@ -439,158 +518,441 @@ def main():
 
     df_filtered['Total_Metric'] = df_filtered['Reporting_Metric'].apply(map_for_totals)
     df_totals = df_filtered[df_filtered['Total_Metric'].notna()].copy()
-
     pivot_totals = df_totals.groupby(['Site Name', 'Total_Metric']).size().reset_index(name='Count')
     pivot_totals_table = pivot_totals.pivot(index='Site Name', columns='Total_Metric', values='Count').fillna(0).astype(int)
 
-    # ------------------------------------------------------------------
-    # Build final pivot with correct column order
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Building final pivot with correct column order...")
-
     final_pivot = pd.DataFrame(index=pivot_table.index)
-
-    for metric in FINAL_METRICS:
+    for metric in BASE_PIVOT_METRICS:
         if metric in ["Open SORS", "Resolved SORS"]:
-            if metric in pivot_totals_table.columns:
-                final_pivot[metric] = pivot_totals_table[metric]
-            else:
-                final_pivot[metric] = 0
-        elif metric in PLACEHOLDER_METRICS:
+            final_pivot[metric] = pivot_totals_table[metric] if metric in pivot_totals_table.columns else 0
+        elif metric in PLACEHOLDER_METRICS or metric in INCIDENT_COLUMNS:
             final_pivot[metric] = 0
         else:
-            if metric in pivot_table.columns:
-                final_pivot[metric] = pivot_table[metric]
-            else:
-                final_pivot[metric] = 0
+            final_pivot[metric] = pivot_table[metric] if metric in pivot_table.columns else 0
 
-    # ------------------------------------------------------------------
-    # Calculate Resolved Actions from source metrics for Site Totals
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Calculating Resolved Actions from source metrics...")
+    # ------------------------------------------------------------------------
+    # 2. INGEST INCIDENTS DIRECTLY (rp2_incidents.csv)
+    # ------------------------------------------------------------------------
+    incidents_path = f"{REP_PREFIX}/rp2_incidents.csv"
+    if client.exists(incidents_path):
+        print(f"\n📂 Ingesting Incidents directly from {incidents_path}...")
+        df_incidents = client.read_csv(incidents_path, dtype=str, low_memory=False)
+
+        # Parse task_created_at
+        df_incidents['created_dt'], _ = parse_date_series(df_incidents.get('task_created_at', pd.Series(dtype=str)))
+
+        # Filter by Date
+        date_mask_incidents = (df_incidents['created_dt'] >= FILTER_START_DATE) & (df_incidents['created_dt'] <= FILTER_END_DATE)
+        df_inc_filtered = df_incidents[date_mask_incidents].copy()
+        print(f"   📊 Filtered to {len(df_inc_filtered):,} incident records in date window")
+
+        # Map Status and Category
+        df_inc_filtered['status'] = df_inc_filtered['task_status_id'].map(INCIDENT_STATUS_MAP).fillna("Other")
+        
+        def map_category(cat):
+            if pd.isna(cat):
+                return None
+            key = str(cat).strip().lower()
+            return INCIDENT_CATEGORY_MAP.get(key)
+
+        df_inc_filtered['mapped_category'] = df_inc_filtered['Category'].apply(map_category)
+        df_inc_valid = df_inc_filtered.dropna(subset=['task_site_name', 'mapped_category']).copy()
+
+        # Build clean lookup map for destination sites
+        dest_site_lookup = {clean_site_name(s): s for s in final_pivot.index}
+        dest_prefix_lookup = {extract_prefix(s): s for s in final_pivot.index if extract_prefix(s)}
+
+        for _, row in df_inc_valid.iterrows():
+            site_raw = row['task_site_name']
+            col = row['mapped_category']
+            clean_s = clean_site_name(site_raw)
+            pfx = extract_prefix(site_raw)
+
+            matched_site = None
+            if clean_s in dest_site_lookup:
+                matched_site = dest_site_lookup[clean_s]
+            elif pfx and pfx in dest_prefix_lookup:
+                matched_site = dest_prefix_lookup[pfx]
+
+            if matched_site:
+                final_pivot.at[matched_site, col] += 1
+
+        print(f"   ✅ Successfully linked incident data directly to sites.")
+    else:
+        print(f"\n⚠️ {incidents_path} not found. Keeping incidents as 0.")
+
+    # ------------------------------------------------------------------------
+    # 3. CALCULATE AUDITS / ACTIONS / INCIDENTS SECTION TOTALS
+    # ------------------------------------------------------------------------
+    final_pivot['Total Audits & Inspections'] = (
+        final_pivot['SubCon Audits']
+        + final_pivot['Weekly HS Inspection']
+        + final_pivot['Work Area Inspections']
+        + final_pivot['Site Setup Audit']
+        + final_pivot['Site Shut Down Audit']
+    )
+
+    final_pivot['Total Overdue Actions'] = (
+        final_pivot['Overdue Quality Action']
+        + final_pivot['Overdue Environmental Action']
+        + final_pivot['Overdue Safety Action']
+        + final_pivot['Overdue Non QSET Action']
+    )
 
     resolved_safety = pivot_table['Resolved Safety'] if 'Resolved Safety' in pivot_table.columns else pd.Series(0, index=pivot_table.index)
     resolved_quality = pivot_table['Resolved Quality'] if 'Resolved Quality' in pivot_table.columns else pd.Series(0, index=pivot_table.index)
     resolved_environmental = pivot_table['Resolved Environmental'] if 'Resolved Environmental' in pivot_table.columns else pd.Series(0, index=pivot_table.index)
+    resolved_non_qset = pivot_table['Resolved Non QSET'] if 'Resolved Non QSET' in pivot_table.columns else pd.Series(0, index=pivot_table.index)
 
-    total_resolved_actions = resolved_safety + resolved_quality + resolved_environmental
-    final_pivot['Total Resolved Actions'] = total_resolved_actions
+    final_pivot['Total Resolved Actions'] = (
+        resolved_safety + resolved_quality + resolved_environmental + resolved_non_qset
+    )
 
-    # ------------------------------------------------------------------
-    # Sort by index (Site Name)
-    # ------------------------------------------------------------------
-    final_pivot = final_pivot.sort_index()
+    final_pivot['Total Incidents'] = (
+        final_pivot['Accidents']
+        + final_pivot['Environmental Incidents']
+        + final_pivot['Near Misses']
+        + final_pivot['Property Damage']
+        + final_pivot['Security Breaches']
+        + final_pivot['Service Strikes']
+    )
 
-    # ------------------------------------------------------------------
-    # Create Site Totals tab
-    # ------------------------------------------------------------------
-    print(f"\n⚔️ Creating Site Totals...")
+    final_pivot['Total Leadership Reports'] = (
+        final_pivot['Contracts Managers Audits']
+        + final_pivot['Senior Leadership Visits']
+    )
 
+    final_pivot['Total QSET'] = (
+        final_pivot['QSET Environmental']
+        + final_pivot['QSET HS Inspection']
+        + final_pivot['QSET Quality Inspections']
+    )
+
+    # ------------------------------------------------------------------------
+    # 4. ESG DIRECT INGESTION & PROCESSING (rp1_esg_report.csv)
+    # ------------------------------------------------------------------------
+    esg_report_counts = {}
+    esg_total_hours = {}
+    df_esg_details = None
+
+    esg_report_path = f"{REP_PREFIX}/rp1_esg_report.csv"
+
+    if client.exists(esg_report_path):
+        print(f"\n📂 Ingesting ESG data directly from {esg_report_path}...")
+        df_esg_raw = client.read_csv(esg_report_path, dtype=str, low_memory=False)
+
+        df_esg_raw['created_dt'], _ = parse_date_series(df_esg_raw.get('created_at', pd.Series(dtype=str)))
+        df_esg_raw['completed_dt'], _ = parse_date_series(df_esg_raw.get('date_completed', pd.Series(dtype=str)))
+        df_esg_raw['conducted_dt'], _ = parse_date_series(df_esg_raw.get('conducted_on', pd.Series(dtype=str)))
+
+        date_mask_esg = (
+            ((df_esg_raw['created_dt'] >= FILTER_START_DATE) & (df_esg_raw['created_dt'] <= FILTER_END_DATE)) |
+            ((df_esg_raw['completed_dt'] >= FILTER_START_DATE) & (df_esg_raw['completed_dt'] <= FILTER_END_DATE)) |
+            ((df_esg_raw['conducted_dt'] >= FILTER_START_DATE) & (df_esg_raw['conducted_dt'] <= FILTER_END_DATE))
+        )
+        df_esg_filtered = df_esg_raw[date_mask_esg].copy()
+
+        esg_source_data = {}
+        for _, row in df_esg_filtered.iterrows():
+            site = row.get('client_site')
+            if pd.isna(site) or not str(site).strip():
+                continue
+
+            clean_key = clean_site_name(site)
+            if not clean_key:
+                continue
+
+            if clean_key not in esg_source_data:
+                esg_source_data[clean_key] = {
+                    'original_site': str(site).strip(),
+                    'prefix': extract_prefix(site),
+                    'inspection_ids': set(),
+                    'total_hours': 0.0,
+                    'd_a_tests': 0.0,
+                    'd_a_fails': 0.0,
+                    'red_cards': 0.0,
+                    'yellow_cards': 0.0,
+                    'agency': 0.0,
+                    'client_reps': 0.0,
+                    'delivery_drivers': 0.0,
+                    'ext_plant': 0.0,
+                    'others': 0.0,
+                    'staff_ops': 0.0,
+                    'sub_con': 0.0,
+                    'visitors': 0.0
+                }
+
+            insp_id = row.get('inspection_id')
+            if insp_id and not pd.isna(insp_id):
+                esg_source_data[clean_key]['inspection_ids'].add(str(insp_id).strip())
+
+            q = row.get('Question')
+            if q in ESG_QUESTION_MAP:
+                field = ESG_QUESTION_MAP[q]
+                val = clean_numeric_val(row.get('Answer'))
+                esg_source_data[clean_key][field] += val
+
+        for clean_key, data in esg_source_data.items():
+            data['total_hours'] = (
+                data['agency'] + data['client_reps'] + data['delivery_drivers'] +
+                data['ext_plant'] + data['others'] + data['staff_ops'] +
+                data['sub_con'] + data['visitors']
+            )
+
+        dest_to_esg = {}
+        used_esg_sites = set()
+        dest_sites_info = {
+            dest_site: {'clean_key': clean_site_name(dest_site), 'prefix': extract_prefix(dest_site)}
+            for dest_site in final_pivot.index
+        }
+
+        for dest_site in final_pivot.index:
+            clean_key = dest_sites_info[dest_site]['clean_key']
+            if clean_key in esg_source_data and clean_key not in used_esg_sites:
+                dest_to_esg[dest_site] = clean_key
+                used_esg_sites.add(clean_key)
+
+        prefix_to_esg = {}
+        for clean_key, data in esg_source_data.items():
+            prefix = data['prefix']
+            if prefix:
+                prefix_to_esg.setdefault(prefix, []).append(clean_key)
+
+        for dest_site in final_pivot.index:
+            if dest_site in dest_to_esg:
+                continue
+            dest_prefix = dest_sites_info[dest_site]['prefix']
+            if dest_prefix and dest_prefix in prefix_to_esg:
+                available = [k for k in prefix_to_esg[dest_prefix] if k not in used_esg_sites]
+                if available:
+                    esg_key = available[0]
+                    dest_to_esg[dest_site] = esg_key
+                    used_esg_sites.add(esg_key)
+
+        df_esg_details_rows = []
+        for clean_key, data in esg_source_data.items():
+            if clean_key in dest_to_esg.values():
+                df_esg_details_rows.append({
+                    'client_site': data['original_site'],
+                    'Agency/Subbie': data['agency'],
+                    'Client Reps': data['client_reps'],
+                    'Delivery Drivers': data['delivery_drivers'],
+                    'Ext Plant': data['ext_plant'],
+                    'Others': data['others'],
+                    'Staff/Ops': data['staff_ops'],
+                    'Sub Con Personnel': data['sub_con'],
+                    'Visitors': data['visitors'],
+                    'Total Hours': data['total_hours'],
+                    'Yellow Cards Issued': data['yellow_cards'],
+                    'Red Cards Issued': data['red_cards'],
+                    'Cards Issued': data['red_cards'] + data['yellow_cards'],
+                    'D&A Tests': data['d_a_tests'],
+                    'D&A Fails': data['d_a_fails']
+                })
+
+        df_esg_details = pd.DataFrame(df_esg_details_rows)
+        if not df_esg_details.empty:
+            df_esg_details = df_esg_details[ESG_DETAILS_COLUMNS].copy().sort_values('client_site')
+
+        for col in ESG_COLUMNS:
+            final_pivot[col] = 0.0
+
+        for dest_site in final_pivot.index:
+            if dest_site in dest_to_esg:
+                esg_key = dest_to_esg[dest_site]
+                if esg_key in esg_source_data:
+                    data = esg_source_data[esg_key]
+                    final_pivot.at[dest_site, 'Weekly ESG Reports'] = float(len(data['inspection_ids']))
+                    final_pivot.at[dest_site, 'DA Tests Conducted'] = float(data['d_a_tests'])
+                    final_pivot.at[dest_site, 'DA Test Failures'] = float(data['d_a_fails'])
+                    final_pivot.at[dest_site, 'Red Cards Issued'] = float(data['red_cards'])
+                    final_pivot.at[dest_site, 'Yellow Cards Issued'] = float(data['yellow_cards'])
+                    final_pivot.at[dest_site, 'Total Site Hours'] = float(data['total_hours'])
+                    esg_report_counts[dest_site] = len(data['inspection_ids'])
+                    esg_total_hours[dest_site] = data['total_hours']
+
+        print(f"   ✅ Successfully linked ESG metrics to {len(dest_to_esg)} sites")
+    else:
+        print(f"\n⚠️ {esg_report_path} not found. Skipping ESG calculations.")
+        for col in ESG_COLUMNS:
+            final_pivot[col] = 0.0
+
+    # ------------------------------------------------------------------------
+    # 5. SOR FREQUENCY RATE
+    # ------------------------------------------------------------------------
+    fallback_site_hours = (FALLBACK_STAFF * FALLBACK_HOURS_PER_WEEK * FALLBACK_WEEKS) / float(FALLBACK_SITES)
+
+    def calculate_sor_frequency(row):
+        total_sors = float(row.get('Open SORS', 0)) + float(row.get('Resolved SORS', 0))
+        site_hours = float(row.get('Total Site Hours', 0.0))
+        effective_hours = site_hours if site_hours > 0 else fallback_site_hours
+
+        if effective_hours > 0 and total_sors > 0:
+            return (total_sors * SOR_RATE_MULTIPLIER) / effective_hours
+        return 0.0
+
+    final_pivot['SOR Frequency Rate'] = final_pivot.apply(calculate_sor_frequency, axis=1)
+
+    # Reorder to standard MCL39 columns
+    final_pivot = final_pivot[MCL39_COLUMNS].sort_index()
+
+    # ------------------------------------------------------------------------
+    # 6. SITE TOTALS SHEET
+    # ------------------------------------------------------------------------
     site_totals = final_pivot.copy()
-
-    site_totals['Total Overdue Actions'] = (
-        site_totals['Overdue Quality Action'] +
-        site_totals['Overdue Environmental Action'] +
-        site_totals['Overdue Safety Action']
-    )
-
-    site_totals['Total Incidents'] = (
-        site_totals['Accidents'] +
-        site_totals['Environmental Incidents'] +
-        site_totals['Near Misses'] +
-        site_totals['Property Damage'] +
-        site_totals['Security Breaches'] +
-        site_totals['Service Strikes']
-    )
-
-    site_totals['Total Leadership'] = (
-        site_totals['Contracts Managers Audits'] +
-        site_totals['Senior Leadership Visits']
-    )
-
-    site_totals['Total QSET'] = (
-        site_totals['QSET Environmental'] +
-        site_totals['QSET HS Inspection'] +
-        site_totals['QSET Quality Inspections']
-    )
-
     site_totals['Total Open SORs'] = site_totals['Open SORS']
     site_totals['Total Resolved SORs'] = site_totals['Resolved SORS']
+    site_totals['Total Leadership'] = site_totals['Total Leadership Reports']
+    site_totals['ESG Reports Completed'] = 0
+    site_totals['ESG Total Hours'] = 0.0
+
+    for site in site_totals.index:
+        if site in esg_report_counts:
+            site_totals.at[site, 'ESG Reports Completed'] = esg_report_counts[site]
+        if site in esg_total_hours:
+            site_totals.at[site, 'ESG Total Hours'] = esg_total_hours[site]
 
     site_totals_columns = [
         'Site Name',
+        'Total Audits & Inspections',
         'Total Overdue Actions',
         'Total Resolved Actions',
         'Total Incidents',
         'Total Leadership',
         'Total QSET',
         'Total Open SORs',
-        'Total Resolved SORs'
+        'Total Resolved SORs',
+        'ESG Reports Completed',
+        'ESG Total Hours'
     ]
 
-    existing_site_totals_cols = [col for col in site_totals_columns if col in site_totals.columns]
-    df_site_totals = site_totals[existing_site_totals_cols].copy()
-    df_site_totals = df_site_totals.reset_index()
+    site_totals_columns = [col for col in site_totals_columns if col in site_totals.columns]
+    df_site_totals = site_totals[site_totals_columns].copy().reset_index()
 
-    print(f"   ✅ Created Site Totals with {len(df_site_totals)} sites, {len(df_site_totals.columns)} columns")
+    final_pivot.index.name = "Site Name"
 
-    # ------------------------------------------------------------------
-    # Save to Excel
-    # ------------------------------------------------------------------
-    output_file = os.path.join(REP_OUTPUT_PATH, "rp2_metric_pivot_by_site.xlsx")
+    # ------------------------------------------------------------------------
+    # 7. WRITE FORMATTED EXCEL WORKBOOK
+    # ------------------------------------------------------------------------
+    output_file = f"{REP_PREFIX}/rp3_mcl39.xlsx"
 
     try:
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            final_pivot.to_excel(writer, sheet_name='Metric_Pivot', index=True)
-            print(f"\n✅ Saved 'Metric_Pivot' sheet to: {output_file}")
-            print(f"   📊 {len(final_pivot):,} sites, {len(final_pivot.columns)} columns")
-
+        excel_buf = io.BytesIO()
+        with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
+            final_pivot.to_excel(writer, sheet_name='MCL39', index=True)
             df_site_totals.to_excel(writer, sheet_name='Site_Totals', index=False)
-            print(f"✅ Saved 'Site_Totals' sheet")
-            print(f"   📊 {len(df_site_totals):,} sites, {len(df_site_totals.columns)} columns")
+
+            if df_esg_details is not None and not df_esg_details.empty:
+                df_esg_details.to_excel(writer, sheet_name='ESG_Details', index=False)
+            else:
+                empty_esg = pd.DataFrame(columns=ESG_DETAILS_COLUMNS)
+                empty_esg.to_excel(writer, sheet_name='ESG_Details', index=False)
+
+            ws = writer.sheets['MCL39']
+            num_data_rows = len(final_pivot)
+            total_row_idx = num_data_rows + 2
+
+            ws.sheet_view.showZeros = False
+
+            hard_side = Side(style="medium", color="000000")
+            thin_side = Side(style="thin", color="E0E0E0")
+            double_bottom = Side(style="double", color="000000")
+
+            section_ranges = [(1, 1, SECTIONS[0])]
+            cur_col = 2
+            for sec in SECTIONS[1:]:
+                start_c = cur_col
+                end_c = cur_col + len(sec["columns"]) - 1
+                section_ranges.append((start_c, end_c, sec))
+                cur_col = end_c + 1
+
+            ws.row_dimensions[1].height = 140
+            ws.row_dimensions[total_row_idx].height = 22
+
+            for (start_c, end_c, sec) in section_ranges:
+                h_fill = PatternFill(start_color=sec["header_color"], end_color=sec["header_color"], fill_type="solid")
+                h_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+                t_fill = PatternFill(start_color=sec["total_color"], end_color=sec["total_color"], fill_type="solid")
+                t_font = Font(name="Calibri", size=10, bold=True, color="000000")
+
+                for col in range(start_c, end_c + 1):
+                    col_letter = get_column_letter(col)
+
+                    # 1. Header Cell
+                    h_cell = ws.cell(row=1, column=col)
+                    h_cell.fill = h_fill
+                    h_cell.font = h_font
+                    
+                    if col == 1:
+                        h_cell.alignment = Alignment(horizontal="left", vertical="bottom", wrap_text=True)
+                    else:
+                        h_cell.alignment = Alignment(textRotation=90, horizontal="center", vertical="bottom", wrap_text=True)
+
+                    h_left = hard_side if col == start_c else thin_side
+                    h_right = hard_side if col == end_c else thin_side
+                    h_cell.border = Border(left=h_left, right=h_right, top=hard_side, bottom=hard_side)
+
+                    # 2. Data Cells
+                    for row in range(2, total_row_idx):
+                        cell = ws.cell(row=row, column=col)
+                        
+                        if col > 1:
+                            col_name = MCL39_COLUMNS[col - 2]
+                            if col_name in ['Total Site Hours', 'SOR Frequency Rate']:
+                                cell.number_format = '#,##0.00;-#,##0.00;""'
+                            else:
+                                cell.number_format = '#,##0;-#,##0;""'
+                            cell.alignment = Alignment(horizontal="center", vertical="center")
+                        else:
+                            cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                        d_left = hard_side if col == start_c else thin_side
+                        d_right = hard_side if col == end_c else thin_side
+                        d_top = hard_side if row == 2 else thin_side
+                        cell.border = Border(left=d_left, right=d_right, top=d_top, bottom=thin_side)
+
+                    # 3. Totals Row
+                    t_cell = ws.cell(row=total_row_idx, column=col)
+                    t_cell.fill = t_fill
+                    t_cell.font = t_font
+
+                    if col == 1:
+                        t_cell.value = "Total"
+                        t_cell.alignment = Alignment(horizontal="left", vertical="center")
+                    else:
+                        t_cell.value = f"=SUM({col_letter}2:{col_letter}{total_row_idx - 1})"
+                        col_name = MCL39_COLUMNS[col - 2]
+                        if col_name in ['Total Site Hours', 'SOR Frequency Rate']:
+                            t_cell.number_format = '#,##0.00;-#,##0.00;""'
+                        else:
+                            t_cell.number_format = '#,##0;-#,##0;""'
+                        t_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                    tot_left = hard_side if col == start_c else thin_side
+                    tot_right = hard_side if col == end_c else thin_side
+                    t_cell.border = Border(left=tot_left, right=tot_right, top=thin_side, bottom=double_bottom)
+
+            # Column dimensions
+            ws.column_dimensions[get_column_letter(1)].width = 50
+            for col_idx in range(2, len(MCL39_COLUMNS) + 2):
+                col_name = MCL39_COLUMNS[col_idx - 2]
+                col_letter = get_column_letter(col_idx)
+                if col_name in ['Total Site Hours', 'SOR Frequency Rate']:
+                    ws.column_dimensions[col_letter].width = 10
+                else:
+                    ws.column_dimensions[col_letter].width = 5
+
+            print(f"\n✅ Saved MCL39 workbook to: {output_file}")
+
+        # With-block has exited here - openpyxl has fully flushed the
+        # workbook into excel_buf. Now upload the complete bytes in one
+        # call, same "build in memory, upload once" pattern already
+        # proven working for RP2 heads Up.py's two-sheet workbook.
+        client.write_bytes(excel_buf.getvalue(), output_file)
 
     except ModuleNotFoundError:
         print(f"\n⚠️ openpyxl not found. Please install: pip install openpyxl")
-        print(f"   Saving as CSV instead...")
-
-        csv_file = os.path.join(REP_OUTPUT_PATH, "rp2_metric_pivot_by_site.csv")
-        final_pivot.to_csv(csv_file, index=True, encoding='utf-8')
-        print(f"✅ Saved pivot to CSV: {csv_file}")
-
-        csv_totals_file = os.path.join(REP_OUTPUT_PATH, "rp2_site_totals.csv")
-        df_site_totals.to_csv(csv_totals_file, index=False, encoding='utf-8')
-        print(f"✅ Saved Site Totals to CSV: {csv_totals_file}")
-
-    # ------------------------------------------------------------------
-    # Show summary
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 80)
-    print("📊 PIVOT TABLE SUMMARY")
-    print("=" * 80)
-
-    print(f"\n📋 Total Sites: {len(final_pivot):,}")
-    print(f"📋 Total Metrics: {len(final_pivot.columns)}")
-
-    print(f"\n📋 Weekly H&S Inspection count breakdown:")
-    print(f"   Original in file: {weekly_total}")
-    print(f"   Valid dates: {weekly_valid}")
-    print(f"   In date range: {weekly_in_range}")
-    print(f"   In final pivot: {weekly_in_pivot}")
-    print(f"   >>> See weekly_hs_excluded_debug.csv for the {weekly_outside} excluded rows")
-    print(f"   >>> See weekly_hs_included_debug.csv for the {weekly_in_range} included rows")
-
-    print(f"\n📋 Site Totals Summary:")
-    for col in df_site_totals.columns:
-        if col != 'Site Name':
-            total = df_site_totals[col].sum()
-            print(f"      {col:<25} total: {total:>8,}")
-
-    print("\n📋 Sample Site Totals (first 10 rows):")
-    print(df_site_totals.head(10).to_string())
-
-    print("\n" + "=" * 80)
-    print("🏁 PIVOT GENERATOR COMPLETE")
-    print("=" * 80)
+        return
 
     return final_pivot
 

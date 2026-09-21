@@ -4,24 +4,43 @@
 """
 Reporting Metric Generator
 Adds Reporting_Metric column to multiple CSV files based on rules
-- INSPECTIONS: Returns ALL matching metrics, comma-separated
-- SITE REPORTS: Returns ONLY site report metrics (single value)
-- QSET: Returns ONLY QSET metrics (single value)
-- CM AUDITS: Returns ONLY CM Audits metrics (single value)
+Returns ALL matching metrics, comma-separated, for every file - a single
+row can legitimately match more than one rule at once (e.g. a
+template_category listing "Site Shut Down Audit, Weekly H&S Inspection"
+both apply to the same submission), and every match needs to survive, not
+just the first one checked.
+
+v2: Added "Site Shut Down Audit" as a new metric - Site Reports group,
+requires Complete status, matches template_category containing
+"Site Shut Down Audit". Separate metric from "Site Setup Audit" (which
+stays exactly as it was, ANY status) - not a rename.
+
+v3: get_reporting_metric_single() is retired. It returned on the FIRST
+matching rule and stopped, silently discarding every other match on the
+same row - confirmed happening for real with template_category values
+like "Site Shut Down Audit, Weekly H&S Inspection, QSET H&S Inspection".
+Every file now uses the same multi-match, comma-separated logic that
+inspections always used. RP3 Metric List.py's comma-exploding logic
+already treats every source uniformly, so nothing downstream needed to
+change for this - it was already built to receive multi-value metrics
+from any file, this was the only place still handing it single values.
 """
 
 import os
+import sys
 import pandas as pd
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+GLD_PREFIX = "GLD"
+REP_PREFIX = "REP"
 
-# Create output folder if it doesn't exist
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # ISSUE CATEGORY TRANSLATION MAP
@@ -38,9 +57,13 @@ ISSUE_CATEGORY_MAP = {
 # METRIC FUNCTIONS
 # ============================================================================
 
-def get_reporting_metric_inspections(row):
+def get_reporting_metric(row):
     """
-    For INSPECTIONS ONLY - Returns ALL matching metrics, comma-separated
+    Returns ALL matching metrics for a row, comma-separated. Used for
+    every file - inspections, site reports, QSET, and CM audits alike.
+    A single row can legitimately satisfy more than one rule at once
+    (multiple categories in template_category, all matching the same
+    Reporting_Group + Reporting_Status), and every match must survive.
     """
     group = str(row.get('Reporting_Group', '')).strip()
     template = str(row.get('template_category', '')).strip()
@@ -69,6 +92,10 @@ def get_reporting_metric_inspections(row):
                 matching_metrics.append("SubCon Audits")
             if "Weekly ESG Report" in template:
                 matching_metrics.append("Weekly ESG Report")
+            # Site Shut Down Audit - separate metric from Site Setup Audit
+            # above, deliberately requires Complete status.
+            if "Site Shut Down Audit" in template:
+                matching_metrics.append("Site Shut Down Audit")
     
     # ============================================================
     # STEP 2: QSET Metrics (require "QSET" in group + "Complete")
@@ -103,57 +130,6 @@ def get_reporting_metric_inspections(row):
     else:
         return None
 
-
-def get_reporting_metric_single(row):
-    """
-    For SITE REPORTS, QSET, and CM AUDITS ONLY - Returns SINGLE matching metric
-    """
-    group = str(row.get('Reporting_Group', '')).strip()
-    template = str(row.get('template_category', '')).strip()
-    status = str(row.get('Reporting_Status', '')).strip()
-    
-    # ============================================================
-    # STEP 1: Site Reports Metrics (require "Site Reports" in group)
-    # ============================================================
-    if "Site Reports" in group:
-        # Work Area Inspections (ANY status)
-        if "Work Area Inspections" in template:
-            return "Work Area Inspections"
-        
-        # Site Setup Audit (ANY status)
-        if "Site Setup Audit" in template:
-            return "Site Setup Audit"
-        
-        # Site Reports metrics that require "Complete" status
-        if status == "Complete":
-            if "Weekly H&S Inspection" in template:
-                return "Weekly H&S Inspection"
-            if "SubCon Audits" in template:
-                return "SubCon Audits"
-            if "Weekly ESG Report" in template:
-                return "Weekly ESG Report"
-    
-    # ============================================================
-    # STEP 2: QSET Metrics (require "QSET" in group + "Complete")
-    # ============================================================
-    if status == "Complete" and "QSET" in group:
-        if "QSET H&S Inspection" in template:
-            return "QSET H&S Inspection"
-        if "QSET Environmental" in template:
-            return "QSET Environmental"
-        if "QSET Quality Inspections" in template:
-            return "QSET Quality Inspections"
-    
-    # ============================================================
-    # STEP 3: CM Audits Metrics (require "CM Audits" in group + "Complete")
-    # ============================================================
-    if status == "Complete" and "CM Audits" in group:
-        if "Contracts Managers Audits" in template:
-            return "Contracts Managers Audits"
-    
-    # No match found
-    return None
-
 # ============================================================================
 # PROCESS FUNCTIONS
 # ============================================================================
@@ -164,14 +140,14 @@ def process_file(filename, folder_path, metric_func):
     print(f"📋 PROCESSING: {filename}")
     print("=" * 80)
     
-    input_file = os.path.join(folder_path, filename)
+    input_file = f"{folder_path}/{filename}"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         
         # Check required columns
@@ -191,7 +167,7 @@ def process_file(filename, folder_path, metric_func):
         df['Reporting_Metric'] = df.apply(metric_func, axis=1)
         
         # Save back
-        df.to_csv(input_file, index=False, encoding='utf-8')
+        client.write_csv(df, input_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved to: {input_file}")
         print(f"   📊 {len(df):,} rows, Reporting_Metric added")
         
@@ -224,14 +200,14 @@ def process_actions():
     print("📋 PROCESSING: gld_actions.csv")
     print("=" * 80)
     
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_actions.csv")
+    input_file = f"{GLD_PREFIX}/gld_actions.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         
         # Check required columns
@@ -260,7 +236,7 @@ def process_actions():
         df['Reporting_Metric'] = df.apply(get_metric, axis=1)
         
         # Save back
-        df.to_csv(input_file, index=False, encoding='utf-8')
+        client.write_csv(df, input_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved to: {input_file}")
         print(f"   📊 {len(df):,} rows, Reporting_Metric added")
         
@@ -282,14 +258,14 @@ def process_issues():
     print("📋 PROCESSING: gld_issues.csv")
     print("=" * 80)
     
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_issues.csv")
+    input_file = f"{GLD_PREFIX}/gld_issues.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         
         # Check required columns
@@ -321,7 +297,7 @@ def process_issues():
         df['Reporting_Metric'] = df.apply(get_metric, axis=1)
         
         # Save back
-        df.to_csv(input_file, index=False, encoding='utf-8')
+        client.write_csv(df, input_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved to: {input_file}")
         print(f"   📊 {len(df):,} rows, Reporting_Metric added")
         
@@ -343,14 +319,14 @@ def process_incidents():
     print("📋 PROCESSING: rp2_incidents.csv")
     print("=" * 80)
     
-    input_file = os.path.join(REP_OUTPUT_PATH, "rp2_incidents.csv")
+    input_file = f"{REP_PREFIX}/rp2_incidents.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         
         # Check required columns
@@ -379,7 +355,7 @@ def process_incidents():
         df['Reporting_Metric'] = df.apply(get_metric, axis=1)
         
         # Save back
-        df.to_csv(input_file, index=False, encoding='utf-8')
+        client.write_csv(df, input_file, index=False, encoding='utf-8')
         print(f"   ✅ Saved to: {input_file}")
         print(f"   📊 {len(df):,} rows, Reporting_Metric added")
         
@@ -403,15 +379,16 @@ def main():
     print("=" * 80)
     print("⚔️  REPORTING METRIC GENERATOR")
     print("=" * 80)
-    print(f"📁 GLD Input: {GLD_INPUT_PATH}")
-    print(f"📁 REP Input/Output: {REP_OUTPUT_PATH}")
+    print(f"📁 GLD Input: ADLS/{GLD_PREFIX}")
+    print(f"📁 REP Input/Output: ADLS/{REP_PREFIX}")
     print("=" * 80)
     
-    # Process files with the appropriate metric logic
-    process_file("gld_inspections.csv", GLD_INPUT_PATH, get_reporting_metric_inspections)  # KEEP COMMA-SEPARATED
-    process_file("rp2_site_reports.csv", REP_OUTPUT_PATH, get_reporting_metric_single)     # SINGLE VALUE ONLY
-    process_file("rp2_QSET_reports.csv", REP_OUTPUT_PATH, get_reporting_metric_single)     # SINGLE VALUE ONLY
-    process_file("rp2_contracts_managers_audits.csv", REP_OUTPUT_PATH, get_reporting_metric_single)  # SINGLE VALUE ONLY
+    # All four now use the same multi-match, comma-separated rule engine -
+    # no more single-value/multi-value split, that split was the bug.
+    process_file("gld_inspections.csv", GLD_PREFIX, get_reporting_metric)
+    process_file("rp2_site_reports.csv", REP_PREFIX, get_reporting_metric)
+    process_file("rp2_QSET_reports.csv", REP_PREFIX, get_reporting_metric)
+    process_file("rp2_contracts_managers_audits.csv", REP_PREFIX, get_reporting_metric)
     
     # Process files with different logic
     process_actions()

@@ -7,20 +7,23 @@ Reads issues_answers.csv from SLV, optionally stacks answer sets, joins with iss
 """
 
 import os
+import sys
 import pandas as pd
 import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-SLV_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\SLV"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
+SLV_PREFIX = "SLV"
+GLD_PREFIX = "GLD"
 
-# Create output folder if it doesn't exist
-os.makedirs(GLD_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -43,8 +46,8 @@ KEEP_ONLY_NEWEST_ANSWER = True
 print("=" * 80)
 print("⚔️  STACK ISSUES ANSWERS - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (SLV): {SLV_INPUT_PATH}")
-print(f"📁 Output (GLD): {GLD_OUTPUT_PATH}")
+print(f"📁 Input (SLV): ADLS/{SLV_PREFIX}")
+print(f"📁 Output (GLD): ADLS/{GLD_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print(f"⏭️  Skip Stacking: {'ON' if SKIP_STACKING else 'OFF'}")
 if not SKIP_STACKING:
@@ -58,25 +61,25 @@ print("=" * 80)
 
 def main():
     # Input files
-    issues_answers_file = os.path.join(SLV_INPUT_PATH, "issues_answers.csv")
-    issues_details_file = os.path.join(SLV_INPUT_PATH, "issues_details.csv")
-    output_file = os.path.join(GLD_OUTPUT_PATH, "gld_issues_answers.csv")
+    issues_answers_file = f"{SLV_PREFIX}/issues_answers.csv"
+    issues_details_file = f"{SLV_PREFIX}/issues_details.csv"
+    output_file = f"{GLD_PREFIX}/gld_issues_answers.csv"
     
-    if not os.path.exists(issues_answers_file):
+    if not client.exists(issues_answers_file):
         print(f"❌ issues_answers file not found: {issues_answers_file}")
         return
     
-    if not os.path.exists(issues_details_file):
+    if not client.exists(issues_details_file):
         print(f"❌ issues_details file not found: {issues_details_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(issues_answers_file)}")
+    print(f"\n📂 Reading: {issues_answers_file}")
     
     try:
         # ====================================================================
         # STEP 1: Read issues_answers
         # ====================================================================
-        df_answers = pd.read_csv(issues_answers_file, dtype=str, low_memory=False)
+        df_answers = client.read_csv(issues_answers_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_answers):,} rows from issues_answers")
         print(f"   📋 Columns: {len(df_answers.columns)}")
         
@@ -87,8 +90,8 @@ def main():
         # ====================================================================
         # STEP 2: Read issues_details
         # ====================================================================
-        print(f"\n📂 Reading: {os.path.basename(issues_details_file)}")
-        df_details = pd.read_csv(issues_details_file, dtype=str, low_memory=False)
+        print(f"\n📂 Reading: {issues_details_file}")
+        df_details = client.read_csv(issues_details_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_details):,} rows from issues_details")
         
         # ====================================================================
@@ -437,7 +440,7 @@ def main():
         # STEP 8: Save to CSV
         # ====================================================================
         
-        df_final.to_csv(output_file, index=False, encoding='utf-8')
+        client.write_csv(df_final, output_file, index=False, encoding='utf-8')
         print(f"\n✅ Saved to: {output_file}")
         print(f"   📊 {len(df_final):,} rows, {len(df_final.columns)} columns")
         

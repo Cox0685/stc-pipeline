@@ -78,8 +78,8 @@ def archive_stage_data() -> bool:
 RUN_STC_API_IN            = True   # Stage 1: API Ingestion
 RUN_STC_JSON_MAP          = True   # Stage 2: JSON Mapping & Flattening
 RUN_STC_DATA_CLEAN        = True   # Stage 3: Standardization & ID Cleaning
-RUN_STC_TABLE_MERGE       = True   # Stage 4: Final Table Merging
-RUN_STC_DATE_SCRAPE       = True   # Stage 5: Date Scraping
+RUN_STC_DATE_SCRAPE       = True   # Stage 4: Date Scraping (must run before Table Merge - see note below)
+RUN_STC_TABLE_MERGE       = True   # Stage 5: Final Table Merging
 RUN_RP1_ESG_REPORT        = True   # Stage 6: ESG Report Generation
 RUN_RP1_ISSUES_ANS        = True   # Stage 7: Issues Answers Processing
 RUN_MAP_STATUS_LOGIC      = True   # Stage 8: Status Logic Mapping
@@ -93,11 +93,14 @@ RUN_RP2_CM_REPORTS        = True   # Stage 15: CM Reports Processing
 RUN_RP2_INCIDENTS         = True   # Stage 16: RP2 Incidents Processing
 RUN_RP2_QSET_REPORTS      = True   # Stage 17: RP2 QSET Reports Processing
 RUN_RP2_SITE_REPORTS      = True   # Stage 18: RP2 Site Reports Processing
-RUN_RP3_REPORTING_LOGIC   = True   # Stage 19: RP3 Reporting Logic
-RUN_RP3_METRIC_LIST       = True   # Stage 20: RP3 Metric List Processing
-RUN_RP3_MCL39             = True   # Stage 21: RP3 MCL39 Processing
-RUN_RP3_ESG_TO_MC39       = True   # Stage 22: RP3 ESG to MC39 Processing
-RUN_RP4_GLD_TO_TLB        = True   # Stage 23: Final Output Execution
+RUN_RP2_HEADSUP           = True   # Stage 19: RP2 HeadsUp Processing (NEW)
+RUN_RP3_REPORTING_LOGIC   = True   # Stage 20: RP3 Reporting Logic
+RUN_RP3_METRIC_LIST       = True   # Stage 21: RP3 Metric List Processing
+RUN_RP3_MCL39             = True   # Stage 22: RP3 MCL39 (now includes ESG - see stage list below)
+RUN_RP3_WEEKLY_INCIDENT   = True   # Stage 23: RP3 Weekly Incident Report (NEW)
+RUN_RP3_WEEKLY_PERFORMANCE = True  # Stage 24: RP3 Weekly Performance Report (NEW)
+RUN_RP4_GLD_TO_TLB        = True   # Stage 25: Final Output Execution
+RUN_RP4_SITE_USER_DATA    = True   # Stage 26: RP4 Site and User Data (NEW)
 
 # ============================================================================
 # DIRECTORY & SCRIPT PATH CONFIGURATION
@@ -106,7 +109,7 @@ RUN_RP4_GLD_TO_TLB        = True   # Stage 23: Final Output Execution
 # Self-locating: this always resolves to whatever folder STC Pipeline Runner.py
 # itself is sitting in, so it survives being extracted/moved/renamed (e.g.
 # Windows appending "(2)", "(3)" etc. to a re-extracted zip's folder name).
-# The 23 stage scripts all live alongside this file, so this one line replaces
+# The 26 stage scripts all live alongside this file, so this one line replaces
 # a hardcoded path that broke every time the folder location changed.
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -127,14 +130,19 @@ PIPELINE_STAGES = [
         "enabled": RUN_STC_DATA_CLEAN
     },
     {
-        "name": "Stage 4: STC Table Merge",
-        "script": "STC Table Merge.py",
-        "enabled": RUN_STC_TABLE_MERGE
-    },
-    {
-        "name": "Stage 5: STC Date Scrape",
+        "name": "Stage 4: STC Date Scrape",
         "script": "STC Date Scrape.py",
         "enabled": RUN_STC_DATE_SCRAPE
+        # IMPORTANT: this must run BEFORE Table Merge, not after. Date Scrape
+        # splits date+time columns in SLV; Table Merge copies SLV -> GLD. If
+        # Table Merge runs first, GLD is built from un-split SLV and every
+        # "_time" column never makes it into GLD at all. (This file had these
+        # two stages the wrong way round - fixed here.)
+    },
+    {
+        "name": "Stage 5: STC Table Merge",
+        "script": "STC Table Merge.py",
+        "enabled": RUN_STC_TABLE_MERGE
     },
     {
         "name": "Stage 6: RP1 ESG Report",
@@ -202,29 +210,59 @@ PIPELINE_STAGES = [
         "enabled": RUN_RP2_SITE_REPORTS
     },
     {
-        "name": "Stage 19: RP3 Reporting Logic",
+        "name": "Stage 19: RP2 HeadsUp",
+        "script": "RP2 heads Up.py",
+        "enabled": RUN_RP2_HEADSUP
+    },
+    {
+        "name": "Stage 20: RP3 Reporting Logic",
         "script": "RP3 Reporting Logic.py",
         "enabled": RUN_RP3_REPORTING_LOGIC
     },
     {
-        "name": "Stage 20: RP3 Metric List",
+        "name": "Stage 21: RP3 Metric List",
         "script": "RP3 Metric List.py",
         "enabled": RUN_RP3_METRIC_LIST
     },
     {
-        "name": "Stage 21: RP3 MCL39",
+        "name": "Stage 22: RP3 MCL39",
         "script": "RP3 MCL39.py",
         "enabled": RUN_RP3_MCL39
+        # This one script now covers what used to be two separate stages
+        # ("RP3 MCL39" and "RP3 ESG to MC39") - they wrote to the same
+        # output file, so the plain version's work was being silently
+        # discarded the moment the ESG version ran right after it.
+        # Consolidated into a single script; the plain version is retired
+        # (moved to archive/) - the old "RP3 ESG to MC39" stage that used
+        # to sit here has been removed, since that script no longer lives
+        # in the live Scripts/ folder and this stage would otherwise fail
+        # with "Script not found".
     },
     {
-        "name": "Stage 22: RP3 ESG to MC39",
-        "script": "RP3 ESG to MC39.py",
-        "enabled": RUN_RP3_ESG_TO_MC39
+        "name": "Stage 23: RP3 Weekly Incident Report",
+        "script": "RP3 Weekly Incident Report.py",
+        "enabled": RUN_RP3_WEEKLY_INCIDENT
     },
     {
-        "name": "Stage 23: Final Output Execution",
+        "name": "Stage 24: RP3 Weekly Performance Report",
+        "script": "RP3 Weekly Performance Report.py",
+        "enabled": RUN_RP3_WEEKLY_PERFORMANCE
+    },
+    {
+        "name": "Stage 25: Final Output Execution",
         "script": "RP4 GLD to TLB.py",
         "enabled": RUN_RP4_GLD_TO_TLB
+    },
+    {
+        "name": "Stage 26: RP4 Site and User Data",
+        "script": "RP4 Site and User Data.py",
+        "enabled": RUN_RP4_SITE_USER_DATA
+        # NOTE: this stage reads a monthly staff timesheet that a human has
+        # to have dropped into TNS as "*Monthly Staff Timesheet.xlsx"
+        # sometime that month - nothing earlier in this pipeline checks
+        # that one exists before getting here. If this stage fails with
+        # "no file matching pattern found", that's why - it's not a bug in
+        # this runner, the upload is a manual step outside the pipeline.
     }
 ]
 

@@ -11,19 +11,22 @@ Reads gld_groups.csv and maps GroupName and Reporting_Group to:
 """
 
 import os
+import sys
+import io
 import pandas as pd
 import re
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
+GLD_PREFIX = "GLD"
 
-# Create output folder if it doesn't exist
-os.makedirs(GLD_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -38,8 +41,8 @@ EXCLUDED_VALUES = ["Non Reporter"]
 print("=" * 80)
 print("⚔️  MAP USER GROUPS - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (GLD): {GLD_INPUT_PATH}")
-print(f"📁 Output (GLD): {GLD_OUTPUT_PATH}")
+print(f"📁 Input (GLD): ADLS/{GLD_PREFIX}")
+print(f"📁 Output (GLD): ADLS/{GLD_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print(f"🚫 Excluded Values: {EXCLUDED_VALUES}")
 print("=" * 80)
@@ -227,14 +230,14 @@ def main():
     # STEP 1: Read gld_groups.csv (the mapping source)
     # ========================================================================
     
-    groups_file = os.path.join(GLD_INPUT_PATH, "gld_groups.csv")
+    groups_file = f"{GLD_PREFIX}/gld_groups.csv"
     
-    if not os.path.exists(groups_file):
+    if not client.exists(groups_file):
         print(f"❌ groups file not found: {groups_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(groups_file)}")
-    df_groups = pd.read_csv(groups_file, dtype=str, low_memory=False)
+    print(f"\n📂 Reading: {groups_file}")
+    df_groups = client.read_csv(groups_file, dtype=str, low_memory=False)
     print(f"   ✅ Loaded {len(df_groups):,} rows")
     
     # Check for required columns
@@ -260,11 +263,11 @@ def main():
     # STEP 2: Map to gld_actions.csv (via task_creator_user_id, fallback to firstname+lastname)
     # ========================================================================
     
-    actions_file = os.path.join(GLD_INPUT_PATH, "gld_actions.csv")
+    actions_file = f"{GLD_PREFIX}/gld_actions.csv"
     
-    if os.path.exists(actions_file):
-        print(f"\n📂 Reading: {os.path.basename(actions_file)}")
-        df_actions = pd.read_csv(actions_file, dtype=str, low_memory=False)
+    if client.exists(actions_file):
+        print(f"\n📂 Reading: {actions_file}")
+        df_actions = client.read_csv(actions_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_actions):,} rows")
         
         if TEST_RUN:
@@ -296,8 +299,8 @@ def main():
                 print(f"   📋 Found {len(multi_matches)} rows with multiple GroupName matches")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_actions.csv")
-            df_actions.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_actions.csv"
+            client.write_csv(df_actions, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'task_creator_user_id' column not found in gld_actions.csv")
@@ -308,11 +311,11 @@ def main():
     # STEP 3: Map to gld_inspections.csv (via author_id, fallback to owner_name)
     # ========================================================================
     
-    inspections_file = os.path.join(GLD_INPUT_PATH, "gld_inspections.csv")
+    inspections_file = f"{GLD_PREFIX}/gld_inspections.csv"
     
-    if os.path.exists(inspections_file):
-        print(f"\n📂 Reading: {os.path.basename(inspections_file)}")
-        df_inspections = pd.read_csv(inspections_file, dtype=str, low_memory=False)
+    if client.exists(inspections_file):
+        print(f"\n📂 Reading: {inspections_file}")
+        df_inspections = client.read_csv(inspections_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_inspections):,} rows")
         
         if TEST_RUN:
@@ -344,8 +347,8 @@ def main():
                 print(f"   📋 Found {len(multi_matches)} rows with multiple GroupName matches")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_inspections.csv")
-            df_inspections.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_inspections.csv"
+            client.write_csv(df_inspections, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'author_id' column not found in gld_inspections.csv")
@@ -356,11 +359,11 @@ def main():
     # STEP 4: Map to gld_investigations.csv (via creator_id)
     # ========================================================================
     
-    investigations_file = os.path.join(GLD_INPUT_PATH, "gld_investigations.csv")
+    investigations_file = f"{GLD_PREFIX}/gld_investigations.csv"
     
-    if os.path.exists(investigations_file):
-        print(f"\n📂 Reading: {os.path.basename(investigations_file)}")
-        df_investigations = pd.read_csv(investigations_file, dtype=str, low_memory=False)
+    if client.exists(investigations_file):
+        print(f"\n📂 Reading: {investigations_file}")
+        df_investigations = client.read_csv(investigations_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_investigations):,} rows")
         
         if TEST_RUN:
@@ -391,8 +394,8 @@ def main():
                 print(f"   📋 Found {len(multi_matches)} rows with multiple GroupName matches")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_investigations.csv")
-            df_investigations.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_investigations.csv"
+            client.write_csv(df_investigations, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'creator_id' column not found in gld_investigations.csv")
@@ -403,11 +406,11 @@ def main():
     # STEP 5: Map to gld_issues.csv (via task_creator_user_id, fallback to firstname+lastname)
     # ========================================================================
     
-    issues_file = os.path.join(GLD_INPUT_PATH, "gld_issues.csv")
+    issues_file = f"{GLD_PREFIX}/gld_issues.csv"
     
-    if os.path.exists(issues_file):
-        print(f"\n📂 Reading: {os.path.basename(issues_file)}")
-        df_issues = pd.read_csv(issues_file, dtype=str, low_memory=False)
+    if client.exists(issues_file):
+        print(f"\n📂 Reading: {issues_file}")
+        df_issues = client.read_csv(issues_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df_issues):,} rows")
         
         if TEST_RUN:
@@ -439,8 +442,8 @@ def main():
                 print(f"   📋 Found {len(multi_matches)} rows with multiple GroupName matches")
             
             # Save back to GLD folder
-            output_file = os.path.join(GLD_OUTPUT_PATH, "gld_issues.csv")
-            df_issues.to_csv(output_file, index=False, encoding='utf-8')
+            output_file = f"{GLD_PREFIX}/gld_issues.csv"
+            client.write_csv(df_issues, output_file, index=False, encoding='utf-8')
             print(f"   ✅ Saved to: {output_file}")
         else:
             print(f"   ⚠️ 'task_creator_user_id' column not found in gld_issues.csv")
@@ -464,20 +467,20 @@ def main():
     
     updated_files = ['gld_actions.csv', 'gld_inspections.csv', 'gld_investigations.csv', 'gld_issues.csv']
     for file in updated_files:
-        file_path = os.path.join(GLD_OUTPUT_PATH, file)
-        if os.path.exists(file_path):
-            size = os.path.getsize(file_path)
+        file_path = f"{GLD_PREFIX}/{file}"
+        if client.exists(file_path):
             try:
-                df = pd.read_csv(file_path)
+                raw = client.read_bytes(file_path)
+                df = pd.read_csv(io.BytesIO(raw))
                 # Check if GroupName column exists
                 if 'GroupName' in df.columns:
                     mapped = df[df['GroupName'] != ''].shape[0]
                     multi = df[df['GroupName'].str.contains(',', na=False)].shape[0]
-                    print(f"   {file:<35} | {len(df):>6} rows | {mapped:>6} mapped | {multi:>6} multi | {size:>10,} bytes")
+                    print(f"   {file:<35} | {len(df):>6} rows | {mapped:>6} mapped | {multi:>6} multi | {len(raw):>10,} bytes")
                 else:
-                    print(f"   {file:<35} | {len(df):>6} rows | {size:>10,} bytes")
-            except:
-                print(f"   {file:<35} | {size:>10,} bytes")
+                    print(f"   {file:<35} | {len(df):>6} rows | {len(raw):>10,} bytes")
+            except Exception:
+                print(f"   {file:<35} | (could not read for summary)")
         else:
             print(f"   {file:<35} | NOT CREATED")
 

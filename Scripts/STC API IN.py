@@ -17,7 +17,7 @@ import threading
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -397,9 +397,16 @@ MANIFEST = {
         "URL_Params": {
             "limit": "{{PAGE_SIZE}}"
         },
-        "Requires_Parent": True,
-        "Parent_Endpoint": "Sites_List",
-        "Parent_ID_Key": "id",
+        # FIXED: this was wrongly configured as a parent-child chain off
+        # Sites_List. /feed/site_members is an organisation-wide FEED
+        # endpoint (same shape as /feed/actions, /feed/users,
+        # /feed/templates, /feed/sites - all standalone) - it has no
+        # {{parent_id}} placeholder anywhere in its path or URL_Params, so
+        # the parent site ID was never actually being sent. Every site was
+        # independently re-pulling the ENTIRE organisation's member feed,
+        # once per site, in parallel - confirmed live locally as the
+        # "insane loop" of hundreds of pages with no end in sight. Now
+        # standalone, pulled once, matching its siblings.
         "Response_Mapping": {
             "Record_Location": ["data"],
             "Token_Location": ["metadata", "next_page"],
@@ -445,7 +452,7 @@ MANIFEST = {
     {"Name": "Templates Compact", "Endpoint": "Templates_List", "Enabled": True},
     {"Name": "Users", "Endpoint": "Users_Feed", "Enabled": True},
     {"Name": "Sites", "Endpoint": "Sites_List", "Enabled": True},
-    {"Name": "Site Members", "Endpoint": "Site_Members", "Enabled": False},
+    {"Name": "Site Members", "Endpoint": "Site_Members", "Enabled": True},  # was False - now safe as a standalone pull, see fix above
     {"Name": "User Groups", "Endpoint": "User_Groups", "Enabled": True},
     {"Name": "Schedule Items", "Endpoint": "Schedule_Items", "Enabled": False}
 ]
@@ -550,6 +557,28 @@ class LocalSafetyCultureIngestor:
         # keeps the pipe full instead of exceeding whatever cap you set here.
         self.requests_per_second = self.global_settings.get('Requests_Per_Second', 8)
         self.rate_limiter = _RateLimiter(self.requests_per_second)
+        
+        # Hard cap on manual 429 retries for standalone endpoints (see
+        # _process_single_endpoint). Without this, a sustained rate limit
+        # on a big endpoint retries forever - no error, no timeout, just
+        # an indefinite sleep loop.
+        self.max_429_retries = self.global_settings.get('Max_429_Retries', 5)
+        
+        # Per-future timeouts. The 429 cap above stops ONE HTTP call from
+        # retrying forever, but that alone doesn't stop a future.result()
+        # call from blocking forever if a thread hangs somewhere else.
+        # Without these, a single stuck thread could block the whole
+        # ThreadPoolExecutor's "with" block from ever exiting.
+        self.child_fetch_timeout_seconds = self.global_settings.get('Child_Fetch_Timeout_Seconds', 180)
+        self.mission_timeout_seconds = self.global_settings.get('Mission_Timeout_Seconds', 1800)
+        
+        # Opt-in only - printing this for every single parent (potentially
+        # thousands across a full run) would massively bloat normal logs.
+        # Flip this on specifically when chasing a hang: it prints which
+        # parent ID (and page) a thread is about to request BEFORE making
+        # the call, so if a thread stalls, the last such line printed for
+        # that thread tells you exactly which API call never came back.
+        self.verbose_child_fetch_logging = self.global_settings.get('Verbose_Child_Fetch_Logging', False)
         
         # How many parent-child chains / standalone endpoints run at once.
         # These hit different endpoints entirely, so there's no reason to
@@ -867,6 +896,7 @@ class LocalSafetyCultureIngestor:
         modified_date = self.get_date_filter(endpoint_def)
         accumulated_records = []
         total_collected = 0
+        consecutive_429s = 0
         
         while has_more:
             # Check if we've reached test limit BEFORE making another request
@@ -896,11 +926,21 @@ class LocalSafetyCultureIngestor:
                 if not resp or resp.status_code != 200:
                     if resp:
                         if resp.status_code == 429:
+                            consecutive_429s += 1
+                            if consecutive_429s > self.max_429_retries:
+                                print(f"   [{self.get_timestamp()}] 🛑 {endpoint_name}: gave up after "
+                                      f"{self.max_429_retries} consecutive 429s on this page - "
+                                      f"moving on instead of hanging. Records collected so far "
+                                      f"({total_collected}) are still kept.")
+                                break
                             retry_after = int(resp.headers.get('Retry-After', 5))
-                            print(f"   [{self.get_timestamp()}] ⏱️ Rate limited - waiting {retry_after}s")
+                            print(f"   [{self.get_timestamp()}] ⏱️ Rate limited - waiting {retry_after}s "
+                                  f"(attempt {consecutive_429s}/{self.max_429_retries})")
                             time.sleep(retry_after)
                             continue
                     break
+                
+                consecutive_429s = 0
                 
                 if response_format == 'NDJSON':
                     records = self.parse_ndjson_response(resp.text)
@@ -1148,7 +1188,11 @@ class LocalSafetyCultureIngestor:
                 for future in as_completed(future_to_item):
                     idx, parent_id = future_to_item[future]
                     try:
-                        records, page_count = future.result()
+                        records, page_count = future.result(timeout=self.child_fetch_timeout_seconds)
+                    except FutureTimeoutError:
+                        print(f"      [{self.get_timestamp()}] 🛑 Timed out fetching parent {parent_id} "
+                              f"after {self.child_fetch_timeout_seconds}s - skipping, moving on")
+                        continue
                     except Exception as e:
                         print(f"      [{self.get_timestamp()}] ❌ Exception fetching parent {parent_id}: {e}")
                         continue
@@ -1176,6 +1220,9 @@ class LocalSafetyCultureIngestor:
         thread gets its own session.
         """
         session = self._get_thread_session()
+        
+        if self.verbose_child_fetch_logging:
+            print(f"      [{self.get_timestamp()}] 🔹 Starting parent {parent_id}")
         
         endpoint = child_def['Endpoint']
         param_match = re.search(r'\{\{(\w+)\}\}', endpoint)
@@ -1217,6 +1264,9 @@ class LocalSafetyCultureIngestor:
                 child_has_more = False
             
             try:
+                if self.verbose_child_fetch_logging:
+                    print(f"      [{self.get_timestamp()}] 🔸 Requesting parent {parent_id}, page {child_page_count}")
+                
                 resp = self.execute_request(session, url, params, payload, timeout)
                 
                 if not resp or resp.status_code != 200:
@@ -1258,6 +1308,10 @@ class LocalSafetyCultureIngestor:
                     
             except Exception:
                 break
+        
+        if self.verbose_child_fetch_logging:
+            print(f"      [{self.get_timestamp()}] ✔️ Finished parent {parent_id}: "
+                  f"{len(child_accumulated)} record(s), {child_page_count} page(s)")
         
         return child_accumulated, child_page_count
     
@@ -1312,7 +1366,11 @@ class LocalSafetyCultureIngestor:
                 for future in as_completed(futures):
                     mission = futures[future]
                     try:
-                        successful, failed = future.result()
+                        successful, failed = future.result(timeout=self.mission_timeout_seconds)
+                    except FutureTimeoutError:
+                        print(f"[{self.get_timestamp()}] 🛑 {mission['Endpoint']} timed out after "
+                              f"{self.mission_timeout_seconds}s - skipping, moving on")
+                        continue
                     except Exception as e:
                         print(f"[{self.get_timestamp()}] ❌ {mission['Endpoint']} failed: {e}")
                         continue
@@ -1342,7 +1400,11 @@ class LocalSafetyCultureIngestor:
                 for future in as_completed(futures):
                     endpoint_name = futures[future]
                     try:
-                        successful, failed = future.result()
+                        successful, failed = future.result(timeout=self.mission_timeout_seconds)
+                    except FutureTimeoutError:
+                        print(f"[{self.get_timestamp()}] 🛑 {endpoint_name} chain timed out after "
+                              f"{self.mission_timeout_seconds}s - skipping, moving on")
+                        continue
                     except Exception as e:
                         print(f"[{self.get_timestamp()}] ❌ {endpoint_name} chain failed: {e}")
                         continue

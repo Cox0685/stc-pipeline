@@ -7,17 +7,23 @@ Reads gld_templates.csv, adds template_category column based on mapping from JSO
 """
 
 import os
+import sys
+import io
 import json
 import pandas as pd
 from typing import Dict, List, Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-GLD_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-TEMPLATE_JSON_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP\template_att.json"
+GLD_PREFIX = "GLD"
+TEMPLATE_JSON_PATH = "REP/template_att.json"
+
+client = azure_io.get_client()
 
 # ============================================================================
 # LOAD TEMPLATE MAPPING FROM JSON
@@ -28,8 +34,7 @@ def load_template_mapping(json_path: str) -> tuple:
     Load template categories from JSON file.
     Returns (id_mapping, name_pattern_mapping)
     """
-    with open(json_path, 'r') as f:
-        data = json.load(f)
+    data = json.loads(client.read_bytes(json_path).decode('utf-8'))
     
     # Build ID-based mapping
     id_mapping = {}
@@ -104,8 +109,8 @@ def main():
     print("⚔️  ADDING TEMPLATE CATEGORIES TO GLD TEMPLATES")
     print("=" * 80)
     print(f"📁 JSON Source: {TEMPLATE_JSON_PATH}")
-    print(f"📁 Input: {GLD_INPUT_PATH}")
-    print(f"📁 Output: {GLD_OUTPUT_PATH}")
+    print(f"📁 Input: ADLS/{GLD_PREFIX}")
+    print(f"📁 Output: ADLS/{GLD_PREFIX}")
     print("=" * 80)
     
     # Load template mapping from JSON
@@ -118,16 +123,16 @@ def main():
         print(f"❌ Error loading JSON: {e}")
         return
     
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_templates.csv")
+    input_file = f"{GLD_PREFIX}/gld_templates.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(input_file)}")
+    print(f"\n📂 Reading: {input_file}")
     
     try:
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         print(f"   📋 Columns: {list(df.columns)}")
         
@@ -197,8 +202,8 @@ def main():
                 print(f"      ... and {len(templates) - 5} more")
         
         # Save back to GLD folder
-        output_file = os.path.join(GLD_OUTPUT_PATH, "gld_templates.csv")
-        df.to_csv(output_file, index=False, encoding='utf-8')
+        output_file = f"{GLD_PREFIX}/gld_templates.csv"
+        client.write_csv(df, output_file, index=False, encoding='utf-8')
         print(f"\n✅ Saved to: {output_file}")
         print(f"   📊 {len(df):,} rows, {len(df.columns)} columns")
         

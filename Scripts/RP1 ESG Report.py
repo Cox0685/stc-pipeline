@@ -2,15 +2,20 @@
 # coding: utf-8
 
 import os
+import sys
 import re
 import pandas as pd
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
+import azure_io
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-SLV_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\SLV"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+SLV_PREFIX = "SLV"
+REP_PREFIX = "REP"
+
+client = azure_io.get_client()
 
 TARGET_TEMPLATE = "iA5 Weekly ESG Report"
 
@@ -135,8 +140,8 @@ def parse_date_robust(val):
 # ============================================================================
 print("⚔️ [STAGE 1] Loading and cleaning audits...", flush=True)
 
-audits_search_path = os.path.join(SLV_INPUT_PATH, "audits_search.csv")
-df_audits = pd.read_csv(audits_search_path, dtype=str, low_memory=False)
+audits_search_path = f"{SLV_PREFIX}/audits_search.csv"
+df_audits = client.read_csv(audits_search_path, dtype=str, low_memory=False)
 
 df_audits["id"] = (
     df_audits["id"].str.replace("-", "", regex=False).str.strip().str.lower()
@@ -146,9 +151,9 @@ df_audits_filtered = df_audits[
 ].copy()
 
 # Join site list
-sites_list_path = os.path.join(SLV_INPUT_PATH, "sites_list.csv")
-if os.path.exists(sites_list_path):
-    df_sites = pd.read_csv(sites_list_path, dtype=str, low_memory=False)
+sites_list_path = f"{SLV_PREFIX}/sites_list.csv"
+if client.exists(sites_list_path):
+    df_sites = client.read_csv(sites_list_path, dtype=str, low_memory=False)
     df_sites["site_uuid"] = df_sites["site_uuid"].str.strip()
     lookup_site = (
         df_sites[["site_uuid", "name"]]
@@ -251,13 +256,13 @@ needed_cols = [
     "result_text_answer_answer",
 ]
 
-sample = pd.read_csv(
-    os.path.join(SLV_INPUT_PATH, "inspections_answers.csv"), nrows=1
+sample = client.read_csv(
+    f"{SLV_PREFIX}/inspections_answers.csv", nrows=1
 )
 available_cols = [c for c in needed_cols if c in sample.columns]
 
-df_answers = pd.read_csv(
-    os.path.join(SLV_INPUT_PATH, "inspections_answers.csv"),
+df_answers = client.read_csv(
+    f"{SLV_PREFIX}/inspections_answers.csv",
     usecols=available_cols,
     dtype=str,
     low_memory=False,
@@ -364,8 +369,8 @@ for col in output_cols:
 
 df_report = df_final[output_cols].fillna("")
 
-out_path_csv = os.path.join(REP_OUTPUT_PATH, "rp1_esg_report.csv")
-df_report.to_csv(out_path_csv, index=False, encoding="utf-8-sig")
+out_path_csv = f"{REP_PREFIX}/rp1_esg_report.csv"
+client.write_csv(df_report, out_path_csv, index=False, encoding="utf-8-sig")
 
 # ============================================================================
 # DIAGNOSTIC VERIFICATION

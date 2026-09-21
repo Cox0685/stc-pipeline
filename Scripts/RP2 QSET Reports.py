@@ -12,17 +12,17 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shared"))
 from report_utils import load_site_lookup, get_site_name, clean_site_name_from_string
+import azure_io
 from datetime import datetime
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-GLD_INPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\GLD"
-REP_OUTPUT_PATH = r"C:\Users\Thomas.Cox\OneDrive - OCU Group\Desktop\00_AST_SystemsIntegration\00_AST_DataUploads\01_STC Safety Culture\Data\REP"
+GLD_PREFIX = "GLD"
+REP_PREFIX = "REP"
 
-# Create output folder if it doesn't exist
-os.makedirs(REP_OUTPUT_PATH, exist_ok=True)
+client = azure_io.get_client()
 
 # ============================================================================
 # CONFIGURATION TOGGLES
@@ -43,8 +43,8 @@ REPORTING_GROUP_FILTER = "QSET"
 print("=" * 80)
 print("⚔️  RP2 QSET REPORTS - LOCAL VERSION")
 print("=" * 80)
-print(f"📁 Input (GLD): {GLD_INPUT_PATH}")
-print(f"📁 Output (REP): {REP_OUTPUT_PATH}")
+print(f"📁 Input (GLD): ADLS/{GLD_PREFIX}")
+print(f"📁 Output (REP): ADLS/{REP_PREFIX}")
 print(f"🧪 Test Run: {'ON' if TEST_RUN else 'OFF'}")
 print(f"🔍 Template Categories: {TEMPLATE_CATEGORIES}")
 print(f"🔍 Reporting Group: '{REPORTING_GROUP_FILTER}'")
@@ -86,18 +86,18 @@ def contains_reporting_group(value):
 # ============================================================================
 
 def main():
-    input_file = os.path.join(GLD_INPUT_PATH, "gld_inspections.csv")
-    output_file = os.path.join(REP_OUTPUT_PATH, "rp2_QSET_reports.csv")
+    input_file = f"{GLD_PREFIX}/gld_inspections.csv"
+    output_file = f"{REP_PREFIX}/rp2_QSET_reports.csv"
     
-    if not os.path.exists(input_file):
+    if not client.exists(input_file):
         print(f"❌ Input file not found: {input_file}")
         return
     
-    print(f"\n📂 Reading: {os.path.basename(input_file)}")
+    print(f"\n📂 Reading: {input_file}")
     
     try:
         # Read the CSV
-        df = pd.read_csv(input_file, dtype=str, low_memory=False)
+        df = client.read_csv(input_file, dtype=str, low_memory=False)
         print(f"   ✅ Loaded {len(df):,} rows")
         print(f"   📋 Columns: {len(df.columns)}")
         
@@ -124,7 +124,7 @@ def main():
         # ====================================================================
         
         print(f"\n⚔️ Loading site lookup from gld_sites.csv...")
-        site_lookup = load_site_lookup(GLD_INPUT_PATH)
+        site_lookup = load_site_lookup(GLD_PREFIX)
         
         # ====================================================================
         # STEP 3: Filter by template_category
@@ -204,7 +204,7 @@ def main():
             print(f"\n   ✅ Sorted by created_at (newest first)")
         
         # Save to REP folder
-        df_final.to_csv(output_file, index=False, encoding='utf-8')
+        client.write_csv(df_final, output_file, index=False, encoding='utf-8')
         print(f"\n✅ Saved to: {output_file}")
         print(f"   📊 {len(df_final):,} rows, {len(df_final.columns)} columns")
         

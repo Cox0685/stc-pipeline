@@ -39,6 +39,14 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # Job-level safety net: caps the ENTIRE run, all 26 steps combined.
+    # GitHub Actions' own default if this isn't set is 360 minutes (6
+    # hours) per job, and NO limit at all on an individual step - which is
+    # exactly what let a genuinely stuck thread inside STC API IN.py sit
+    # unbounded with nothing stopping it. This is the workflow-level
+    # equivalent of the subprocess-kill timeout already built into the
+    # local STC Pipeline Runner.py.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +64,14 @@ jobs:
 
       - name: Stage 1 - Ingest from SafetyCulture (-> TNS)
         working-directory: Scripts
+        # Extra per-step cap on top of the job-level one above - this is
+        # specifically the step where a stuck thread inside a
+        # ThreadPoolExecutor's shutdown has been observed hanging with no
+        # further output at all, well past STC API IN.py's own internal
+        # future.result() timeouts. 20 min matches the equivalent local
+        # stage timeout; a real ingestion run has completed in well under
+        # that in every run seen so far.
+        timeout-minutes: 20
         env:
           ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
           ADLS_FILESYSTEM: stc-data

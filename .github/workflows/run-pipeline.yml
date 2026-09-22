@@ -47,6 +47,16 @@ jobs:
     # equivalent of the subprocess-kill timeout already built into the
     # local STC Pipeline Runner.py.
     timeout-minutes: 90
+    env:
+      # Forces Python's stdout to flush immediately on every print(),
+      # rather than block-buffering (the default when not attached to a
+      # real terminal, exactly GitHub Actions' environment). Without this,
+      # the log can appear to freeze at an earlier line than where the
+      # script actually is - a genuine hang deeper in the code (inside a
+      # thread pool, for instance) can leave print() output sitting in an
+      # unflushed buffer, making the log misleading about where things
+      # actually stopped.
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
 

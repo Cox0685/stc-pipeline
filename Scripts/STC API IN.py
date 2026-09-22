@@ -461,6 +461,36 @@ MANIFEST = {
 print(f"✅ Manifest loaded: {len(MANIFEST['Endpoint_Definitions'])} endpoints, {len(MANIFEST['Missions'])} missions")
 
 # ============================================================================
+# RUNTIME OVERRIDES (set by the calling GitHub Actions workflow - optional)
+# ============================================================================
+# Lets the workflow control which missions run without editing this file
+# directly - e.g. run-pipeline.yml uses this to skip User_Groups on every
+# day except Friday (that one mission alone was seen taking 2.5+ hours
+# with the current user count, which doesn't need refreshing daily). If
+# the env var isn't set, the MANIFEST above is used exactly as written.
+
+_mission_overrides_raw = os.environ.get("MISSION_ENABLED_OVERRIDES")
+if _mission_overrides_raw:
+    try:
+        _mission_overrides = json.loads(_mission_overrides_raw)
+        _override_count = 0
+        _unknown_endpoints = []
+        _known_endpoints = {m["Endpoint"] for m in MANIFEST["Missions"]}
+        for _mission in MANIFEST["Missions"]:
+            _endpoint = _mission["Endpoint"]
+            if _endpoint in _mission_overrides:
+                _mission["Enabled"] = _mission_overrides[_endpoint]
+                _override_count += 1
+        for _endpoint_name in _mission_overrides:
+            if _endpoint_name not in _known_endpoints:
+                _unknown_endpoints.append(_endpoint_name)
+        print(f"🔧 Applied {_override_count} mission enable/disable override(s) from the workflow")
+        if _unknown_endpoints:
+            print(f"   ⚠️ {len(_unknown_endpoints)} override(s) didn't match any known mission: {_unknown_endpoints}")
+    except Exception as e:
+        print(f"⚠️ Could not parse MISSION_ENABLED_OVERRIDES - ignoring, using MANIFEST as written: {e}")
+
+# ============================================================================
 # LOCAL SAFETYCULTURE INGESTOR - SEQUENTIAL (No Threading)
 # ============================================================================
 

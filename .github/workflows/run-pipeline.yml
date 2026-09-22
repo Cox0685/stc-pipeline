@@ -32,9 +32,15 @@ name: Run STC Pipeline (TNS through GLD, REP, and Tables, scheduled)
 # run at any stage won't silently feed garbage into later stages.
 
 on:
-  workflow_dispatch: # manual "Run workflow" button, for testing this before trusting the schedule
+  workflow_dispatch:
+    inputs:
+      include_user_groups:
+        description: 'Also pull User_Groups this run? (slow - can take 2.5+ hours with the current user count)'
+        type: boolean
+        default: false
   schedule:
-    - cron: '0 2 * * *' # daily 02:00 UTC - adjust once you know real run duration
+    - cron: '0 2 * * 0-4,6' # Sun/Mon/Tue/Wed/Thu/Sat, 02:00 UTC - fast run, skips User_Groups
+    - cron: '0 2 * * 5'     # Friday, 02:00 UTC - full run, includes User_Groups, longer timeout
 
 jobs:
   run-pipeline:
@@ -46,7 +52,7 @@ jobs:
     # unbounded with nothing stopping it. This is the workflow-level
     # equivalent of the subprocess-kill timeout already built into the
     # local STC Pipeline Runner.py.
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       # Forces Python's stdout to flush immediately on every print(),
       # rather than block-buffering (the default when not attached to a
@@ -68,6 +74,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r infra/requirements.txt
 
+      - name: Decide whether this run includes User_Groups
+        id: groups_check
+        run: |
+          if [ "${{ github.event.schedule }}" == "0 2 * * 5" ] || [ "${{ github.event.inputs.include_user_groups }}" == "true" ]; then
+            echo "include_groups=true" >> "$GITHUB_OUTPUT"
+            echo "stage1_timeout=180" >> "$GITHUB_OUTPUT"
+            echo "Including User_Groups this run - Stage 1 timeout set to 180 minutes"
+          else
+            echo "include_groups=false" >> "$GITHUB_OUTPUT"
+            echo "stage1_timeout=20" >> "$GITHUB_OUTPUT"
+            echo "Skipping User_Groups this run - Stage 1 timeout set to 20 minutes"
+          fi
+
       # ======================================================================
       # STC CORE: TNS -> BNZ -> SLV -> GLD
       # ======================================================================
@@ -78,14 +97,15 @@ jobs:
         # specifically the step where a stuck thread inside a
         # ThreadPoolExecutor's shutdown has been observed hanging with no
         # further output at all, well past STC API IN.py's own internal
-        # future.result() timeouts. 20 min matches the equivalent local
-        # stage timeout; a real ingestion run has completed in well under
-        # that in every run seen so far.
-        timeout-minutes: 20
+        # future.result() timeouts. Dynamic: 20 min on a normal day (no
+        # User_Groups - that alone was seen taking 2.5+ hours for the full
+        # user count), 180 min on the day it's included.
+        timeout-minutes: ${{ fromJSON(steps.groups_check.outputs.stage1_timeout) }}
         env:
           ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
           ADLS_FILESYSTEM: stc-data
           SAFETYCULTURE_API_KEY: ${{ secrets.SAFETYCULTURE_API_KEY }}
+          MISSION_ENABLED_OVERRIDES: "${{ steps.groups_check.outputs.include_groups == 'true' && '{}' || '{\"User_Groups\": false}' }}"
         run: python "STC API IN.py"
 
       - name: Stage 2 - Flatten JSON (TNS -> BNZ)

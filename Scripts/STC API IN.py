@@ -436,8 +436,8 @@ MANIFEST = {
     {"Name": "Issues Answers", "Endpoint": "Issues_Answers", "Enabled": True},
     {"Name": "Groups", "Endpoint": "Groups_List", "Enabled": True},
     {"Name": "Group Users", "Endpoint": "Groups_Users", "Enabled": True},
-    {"Name": "HeadsUp", "Endpoint": "HeadsUp_List", "Enabled": False},
-    {"Name": "HeadsUp Users", "Endpoint": "HeadsUp_Users", "Enabled": False},
+    {"Name": "HeadsUp", "Endpoint": "HeadsUp_List", "Enabled": True},  # was False - never actually enabled for online ingestion
+    {"Name": "HeadsUp Users", "Endpoint": "HeadsUp_Users", "Enabled": True},  # was False - same
     {"Name": "Inspections", "Endpoint": "Audits_Search", "Enabled": True},
     {"Name": "Inspection Details", "Endpoint": "Audits_Details", "Enabled": True},
     {"Name": "Inspection Answers", "Endpoint": "Inspections_Answers", "Enabled": True},

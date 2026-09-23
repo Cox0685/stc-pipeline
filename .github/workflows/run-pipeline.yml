@@ -87,8 +87,8 @@ jobs:
             echo "Including User_Groups this run - Stage 1 timeout set to 180 minutes"
           else
             echo "include_groups=false" >> "$GITHUB_OUTPUT"
-            echo "stage1_timeout=20" >> "$GITHUB_OUTPUT"
-            echo "Skipping User_Groups this run - Stage 1 timeout set to 20 minutes"
+            echo "stage1_timeout=45" >> "$GITHUB_OUTPUT"
+            echo "Skipping User_Groups this run - Stage 1 timeout set to 45 minutes"
           fi
 
       # ======================================================================
@@ -102,7 +102,7 @@ jobs:
         # specifically the step where a stuck thread inside a
         # ThreadPoolExecutor's shutdown has been observed hanging with no
         # further output at all, well past STC API IN.py's own internal
-        # future.result() timeouts. Dynamic: 20 min on a normal day (no
+        # future.result() timeouts. Dynamic: 45 min on a normal day (no
         # User_Groups - that alone was seen taking 2.5+ hours for the full
         # user count), 180 min on the day it's included.
         timeout-minutes: ${{ fromJSON(steps.groups_check.outputs.stage1_timeout) }}

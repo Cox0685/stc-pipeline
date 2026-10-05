@@ -14,7 +14,12 @@ SLV_PREFIX = "SLV"
 client = azure_io.get_client()
 
 # Prefix / Suffix patterns to exclude from transformation
-EXCLUDE_PATTERNS = ('detail_', 'result_', '_ingested', 'question_')
+# '_time' added here: any column already ending in _time is the OUTPUT of
+# a previous split, never something that itself needs splitting. Without
+# this, running this script twice would treat a column's own _time
+# companion as a fresh "datetime column" and try to split IT too - see the
+# companion-column guard below for why that alone isn't quite enough.
+EXCLUDE_PATTERNS = ('detail_', 'result_', '_ingested', 'question_', '_time')
 
 def should_exclude_col(col_name):
     """
@@ -92,6 +97,19 @@ def process_file(file_path):
             print(f"   --> Skipping excluded column: {col}")
             continue
 
+        # Companion-column guard: if <col>_time already exists, this
+        # column has already been split on a previous run and is now a
+        # pure date (or pure time) value with no remaining time
+        # component. Splitting it again would have dateutil silently
+        # default the missing time to midnight, overwriting the real
+        # time value already sitting safely in the companion column.
+        # This is what caused task_created_at_time to end up holding
+        # today's date instead of the real time it should have kept.
+        time_col_name = f"{col}_time"
+        if time_col_name in df.columns:
+            print(f"   --> Skipping {col}: already has a _time companion (previously split)")
+            continue
+
         if is_datetime_column(df[col]):
             print(f"   --> Splitting Datetime Column: {col}")
             
@@ -105,12 +123,7 @@ def process_file(file_path):
             df[col] = dates
 
             # Insert <col>_time column directly next to the original column
-            time_col_name = f"{col}_time"
             col_idx = df.columns.get_loc(col)
-            
-            # Drop existing <col>_time if it already exists to avoid duplication
-            if time_col_name in df.columns:
-                df.drop(columns=[time_col_name], inplace=True)
 
             df.insert(col_idx + 1, time_col_name, times)
             modified = True

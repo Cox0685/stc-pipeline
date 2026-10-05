@@ -318,3 +318,26 @@ jobs:
         # found", that's why - it's not a bug in the workflow, the upload
         # is a manual step outside this pipeline.
         run: python "RP4 Site and User Data.py"
+
+      - name: Stage 27 - RP2 Samsara User Data (REP)
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        # Reads REP/rp2_site_user_data.csv (written by Stage 26 just above),
+        # plus two manual uploads in REP/custom reports/driver data/:
+        # "Tick List Week N.xlsx" (highest week wins) and
+        # "Asset Responsible person.xlsx".
+        run: python "RP2 Samsara User Data.py"
+
+      - name: Stage 28 - RP4 Waste Data (REP)
+        # !cancelled() so this still runs if Stage 26/27 failed (e.g. no
+        # monthly timesheet uploaded yet) - it doesn't depend on either.
+        if: ${{ !cancelled() }}
+        working-directory: Scripts
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+        # Reads the newest "*Scope 3*.xlsx" in TNS/static source files/ - a
+        # manual monthly upload, same as the staff timesheet.
+        run: python "RP4 Waste Data.py"

@@ -44,32 +44,33 @@ output_paths = {
 # 2. DEFINE LEAN COLUMNS PER SOURCE
 # ==========================================
 cols_actions = [
-    'task_completed_at', 'task_created_at', 'task_creator_firstname', 'task_creator_lastname', 
-    'task_due_at', 'task_modified_at', 'task_occurred_at', 'task_site_area', 'task_site_name', 
-    'task_title', 'task_unique_id', 'template_name', 'Reporting_Status', 'template_category', 
-    'QSET_category', 'GroupName', 'Reporting_Group', 'Reporting_Metric'
+    'task_completed_at', 'task_created_at', 'task_creator_firstname', 'task_creator_lastname',
+    'task_due_at', 'task_modified_at', 'task_occurred_at', 'task_site_area', 'task_site_name',
+    'task_title', 'task_unique_id', 'task_task_id', 'template_name', 'Reporting_Status',
+    'template_category', 'QSET_category', 'GroupName', 'Reporting_Group', 'Reporting_Metric',
+    'task_inspection_inspection_id', 'task_inspection_inspection_name', 'task_references_0_type'
 ]
 
 cols_issues = [
-    'category_key', 'location_geo_position_latitude', 'location_geo_position_longitude', 
-    'task_completed_at', 'task_created_at', 'task_creator_firstname', 'task_creator_lastname', 
-    'task_creator_user_id', 'task_description', 'task_due_at', 'task_modified_at', 'task_occurred_at', 
-    'task_site_area', 'task_site_name', 'task_title', 'task_unique_id', 'Reporting_Status', 
+    'category_key', 'location_geo_position_latitude', 'location_geo_position_longitude',
+    'task_completed_at', 'task_created_at', 'task_creator_firstname', 'task_creator_lastname',
+    'task_creator_user_id', 'task_description', 'task_due_at', 'task_modified_at', 'task_occurred_at',
+    'task_site_area', 'task_site_name', 'task_title', 'task_unique_id', 'Reporting_Status',
     'GroupName', 'Reporting_Group', 'Reporting_Metric'
 ]
 
 cols_inspections = [
-    'author_name', 'client_site', 'conducted_on', 'created_at', 'date_completed', 
-    'date_modified', 'date_started', 'id', 'latitude', 'longitude', 'modified_at', 
-    'name', 'site_name', 'template_name', 'Reporting_Status', 'template_category', 
+    'author_name', 'client_site', 'conducted_on', 'created_at', 'date_completed',
+    'date_modified', 'date_started', 'id', 'latitude', 'longitude', 'modified_at',
+    'name', 'site_name', 'template_name', 'Reporting_Status', 'template_category',
     'QSET_category', 'GroupName', 'Reporting_Group', 'Reporting_Metric'
 ]
 
 cols_incidents = [
-    'task_site_name', 'task_status_id', 'task_site_area', 'task_unique_id', 
-    'task_created_at', 'task_modified_at', 'task_occurred_at', 'task_creator_firstname', 
-    'task_creator_lastname', 'task_creator_user_id', 'category_key', 'Category', 
-    'Details', 'Further Information', 'HIPO?', 'Immediate Actions', 'Lost Time', 
+    'task_site_name', 'task_status_id', 'task_site_area', 'task_unique_id',
+    'task_created_at', 'task_modified_at', 'task_occurred_at', 'task_creator_firstname',
+    'task_creator_lastname', 'task_creator_user_id', 'category_key', 'Category',
+    'Details', 'Further Information', 'HIPO?', 'Immediate Actions', 'Lost Time',
     'Please add any other Information of Note?', 'Reporter', 'Site Client', 'Treatment Required',
     'location_geo_position_latitude', 'location_geo_position_longitude'
 ]
@@ -98,6 +99,7 @@ incident_cat_map = {
     'Near Miss': 'Near Miss'
 }
 
+
 def clean_site_name(val):
     if pd.isna(val):
         return 'No Site'
@@ -110,12 +112,14 @@ def clean_site_name(val):
         return s
     return 'No Site'
 
+
 def fill_missing_site_area(row):
     current_area = row.get('site_area')
     if pd.isna(current_area) or str(current_area).strip().lower() in ['', 'nan', 'none', 'null']:
         site_name = str(row.get('site_name')).strip()
         return sites_map.get(site_name, current_area)
     return current_area
+
 
 def format_creator(df, first_col, last_col):
     if first_col in df.columns and last_col in df.columns:
@@ -127,28 +131,38 @@ def format_creator(df, first_col, last_col):
     else:
         df['creator'] = None
 
+
 def reorder_columns(df):
     front_cols = [
-        'source_type', 'unique_id', 'site_name', 'site_area', 
-        'latitude', 'longitude', 'title', 'status', 'category', 
-        'HIPO?', 'Lost Time', 'template_name', 'creator', 
+        'source_type', 'unique_id', 'task_id', 'site_name', 'site_area',
+        'latitude', 'longitude', 'title', 'status', 'category',
+        'HIPO?', 'Lost Time', 'template_name', 'creator',
         'created_at', 'occurred_at', 'completed_at', 'due_at'
     ]
     existing_front = [c for c in front_cols if c in df.columns]
     remaining_cols = [c for c in df.columns if c not in existing_front]
     return df[existing_front + remaining_cols]
 
+
 def update_global_lookups(df):
     """Dynamically updates sites_map with discovered site_name -> site_area pairs."""
     if 'site_name' in df.columns and 'site_area' in df.columns:
         valid_pairs = df[
-            (df['site_name'] != 'No Site') & 
-            df['site_area'].notna() & 
+            (df['site_name'] != 'No Site') &
+            df['site_area'].notna() &
             (df['site_area'].astype(str).str.strip().str.lower().isin(['', 'nan', 'none', 'null']) == False)
         ][['site_name', 'site_area']].drop_duplicates()
-        
+
         for _, row in valid_pairs.iterrows():
             sites_map.setdefault(str(row['site_name']).strip(), str(row['site_area']).strip())
+
+
+def warn_missing_columns(df, expected_cols, dataset_label):
+    """Flags any requested columns that were not found in the source file."""
+    missing = [c for c in expected_cols if c not in df.columns]
+    if missing:
+        print(f" -> WARNING ({dataset_label}): columns not found in source and skipped: {missing}")
+
 
 geo_frames = []
 
@@ -159,6 +173,7 @@ geo_frames = []
 # --- A. ISSUES / SORS ---
 print("\n[1/6] Processing Issues & SORs...")
 df_issues = client.read_csv(raw_paths['issues'], usecols=lambda c: c in cols_issues, low_memory=False)
+warn_missing_columns(df_issues, cols_issues, 'Issues')
 df_issues['source_type'] = 'issue'
 format_creator(df_issues, 'task_creator_firstname', 'task_creator_lastname')
 
@@ -193,11 +208,13 @@ print(f" -> Deployed Issues: {len(df_issues):,} rows to {output_paths['issues']}
 # --- B. ACTIONS ---
 print("\n[2/6] Processing Actions...")
 df_actions = client.read_csv(raw_paths['actions'], usecols=lambda c: c in cols_actions, low_memory=False)
+warn_missing_columns(df_actions, cols_actions, 'Actions')
 df_actions['source_type'] = 'action'
 format_creator(df_actions, 'task_creator_firstname', 'task_creator_lastname')
 
 rename_actions = {
-    'task_unique_id': 'unique_id', 'task_site_name': 'site_name', 'task_site_area': 'site_area', 
+    'task_unique_id': 'unique_id', 'task_task_id': 'task_id',
+    'task_site_name': 'site_name', 'task_site_area': 'site_area',
     'task_title': 'title', 'Reporting_Status': 'status', 'template_category': 'category', 
     'task_created_at': 'created_at', 'task_modified_at': 'modified_at', 'task_occurred_at': 'occurred_at', 
     'task_completed_at': 'completed_at', 'task_due_at': 'due_at', 'GroupName': 'group_name', 
@@ -215,10 +232,13 @@ update_global_lookups(df_actions)
 df_actions = reorder_columns(df_actions)
 client.write_csv(df_actions, output_paths['actions'], index=False)
 print(f" -> Deployed Actions: {len(df_actions):,} rows to {output_paths['actions']}")
+if 'task_id' in df_actions.columns:
+    print(f" -> task_id populated on {df_actions['task_id'].notna().sum():,} of {len(df_actions):,} actions")
 
 # --- C. INSPECTIONS ---
 print("\n[3/6] Processing Inspections...")
 df_inspections = client.read_csv(raw_paths['inspections'], usecols=lambda c: c in cols_inspections, low_memory=False)
+warn_missing_columns(df_inspections, cols_inspections, 'Inspections')
 df_inspections['source_type'] = 'inspection'
 if 'author_name' in df_inspections.columns:
     df_inspections['creator'] = df_inspections['author_name']
@@ -249,6 +269,7 @@ print(f" -> Deployed Inspections: {len(df_inspections):,} rows to {output_paths[
 # --- D. INCIDENTS ---
 print("\n[4/6] Processing Incidents...")
 df_incidents = client.read_csv(raw_paths['incidents'], usecols=lambda c: c in cols_incidents, low_memory=False)
+warn_missing_columns(df_incidents, cols_incidents, 'Incidents')
 df_incidents['source_type'] = 'incident'
 format_creator(df_incidents, 'task_creator_firstname', 'task_creator_lastname')
 
@@ -370,10 +391,10 @@ else:
         s_name = str(row.get('site_name', '')).strip()
         s_area = str(row.get('site_area', '')).strip()
         raw_members = str(row.get('Members', ''))
-        
+
         if pd.isna(raw_members) or raw_members.strip().lower() in ['0', '#n/a', 'nan', 'none', 'null', '']:
             continue
-        
+
         for member in raw_members.split(','):
             m_name = member.strip()
             if m_name and m_name.lower() not in ['0', '#n/a', 'nan', 'none', 'null']:
@@ -398,14 +419,14 @@ else:
     if client.exists(raw_paths['site_members']):
         df_sm_raw = client.read_csv(raw_paths['site_members'], low_memory=False)
         id_col = 'member_id' if 'member_id' in df_sm_raw.columns else ('user_id' if 'user_id' in df_sm_raw.columns else None)
-        
+
         if id_col and 'site_id' in df_sm_raw.columns:
             df_sm_raw = df_sm_raw[[id_col, 'site_id']].dropna().drop_duplicates()
             df_sm_raw.rename(columns={id_col: 'user_id'}, inplace=True)
-            
+
             df_sm_id_merged = pd.merge(df_sm_raw, df_sites_truth[['site_id', 'site_name', 'site_area']], on='site_id', how='inner')
             df_sm_id_merged = pd.merge(df_sm_id_merged, df_u, on='user_id', how='inner')
-            
+
             df_site_user_matched = pd.concat([df_site_user_matched, df_sm_id_merged], ignore_index=True).drop_duplicates(subset=['site_id', 'user_id'])
 
     # 5. Load Groups
@@ -431,7 +452,7 @@ else:
 
     # 7. Final Reordering and Output
     final_cols = [
-        'site_id', 'site_name', 'site_area', 
+        'site_id', 'site_name', 'site_area',
         'user_id', 'user_name', 'firstname', 'lastname', 'email', 'user_active', 'user_seat_type',
         'group_name', 'reporting_group', 'group_member_status'
     ]

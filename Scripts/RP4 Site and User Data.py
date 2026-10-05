@@ -25,6 +25,7 @@ GLD_SITES_CSV = "GLD/gld_sites.csv"
 GLD_USERS_CSV = "GLD/gld_users.csv"
 GLD_GROUPS_CSV = "GLD/gld_groups.csv"
 GLD_SITE_MEMBERS_CSV = "GLD/gld_site_members.csv"
+GLD_INSPECTIONS_CSV = "GLD/gld_inspections.csv"
 
 # Separate deliverable from the timesheet-based rp2_site_user_data.csv
 # above - this one is "who's on this site's own Members roster and what
@@ -51,6 +52,56 @@ SITE_NAME_OVERRIDES = {
 }
 
 # ---------------------------------------------------------
+# Job Type Mapping (keyed by integer site number)
+# ---------------------------------------------------------
+# Integer keys so they line up with 'Contract Site Number' (Int64) and with
+# extract_site_key_from_gld(). Leading zeros drop naturally: 0160 -> 160.
+# Anything not listed here comes out as UNMAPPED_JOB_TYPE.
+JOB_TYPE_MAP = {
+    2349: "Substation & Grid",
+    2342: "BESS",
+    2402: "General Civils & Overhead",
+    2361: "Wind Farm",
+    2322: "Substation & Grid",
+    2377: "Substation & Grid",
+    2336: "Cabling",
+    2345: "Cabling",
+    2354: "BESS",
+    2343: "Wind Farm",
+    160: "General Civils & Overhead",    # 0160 North Office
+    23571: "Substation & Grid",
+    23572: "Substation & Grid",
+    2399: "General Civils & Overhead",
+    2378: "Substation & Grid",
+    2375: "Substation & Grid",
+    2340: "Wind Farm",
+    2337: "Wind Farm",
+    2366: "General Civils & Overhead",
+    2397: "Substation & Grid",
+    2313: "General Civils & Overhead",
+    2316: "General Civils & Overhead",
+    2385: "Substation & Grid",
+    2369: "BESS",
+    2403: "BESS",
+    130: "General Civils & Overhead",    # 0130 North Yard
+    2370: "Substation & Grid",
+    2371: "Substation & Grid",
+    2373: "Cabling",
+    2393: "Substation & Grid",
+    2404: "Cabling",
+    2352: "Wind Farm",
+    2372: "Wind Farm",
+    2374: "Substation & Grid",
+    2364: "Cabling",
+    2405: "Wind Farm",
+    2305: "Wind Farm",
+    2333: "BESS",
+    2392: "Substation & Grid",
+    150: "General Civils & Overhead",    # 0150 Head Office
+}
+UNMAPPED_JOB_TYPE = "Unmapped"
+
+# ---------------------------------------------------------
 # Access Permissions Configuration (Case-insensitive)
 # ---------------------------------------------------------
 UNRESTRICTED_USERS = {
@@ -64,6 +115,67 @@ UNRESTRICTED_USERS = {
 def clean_str(val) -> str:
     """Helper to cleanly extract trimmed string values."""
     return str(val).strip() if val is not None and not pd.isna(val) else ""
+
+
+def clean_id_str(val) -> str:
+    """Helper to cleanly extract clean ID string values, removing trailing .0."""
+    if pd.isna(val) or val is None:
+        return ""
+    s = str(val).strip()
+    if s.lower() in ["nan", "none", "null", "not in mitti", ""]:
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def map_job_type(site_num) -> str:
+    """Looks up the Job Type for a site number; returns UNMAPPED_JOB_TYPE if unknown/blank."""
+    if site_num is None or pd.isna(site_num):
+        return UNMAPPED_JOB_TYPE
+    try:
+        return JOB_TYPE_MAP.get(int(site_num), UNMAPPED_JOB_TYPE)
+    except (ValueError, TypeError):
+        return UNMAPPED_JOB_TYPE
+
+
+def is_date_like(val) -> bool:
+    """
+    Detects if a string is a date (e.g. '12-Feb-26', '21-Jan-26', '01.05.2026', '03-Feb-26').
+    Safely ignores hyphenated site numbers like '2357-1' or '2357/1'.
+    """
+    if pd.isna(val) or val is None:
+        return False
+    v = str(val).strip()
+    if not v:
+        return False
+
+    # Exclude site codes like '2357-1', '2357/1', '2357 - 1'
+    if re.match(r"^\d{3,5}[\s]*[-/][\s]*\d{1,2}$", v):
+        return False
+
+    months = (
+        r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    )
+
+    # 1. Day-Month-Year e.g. '12-Feb-26', '21-Jan-26', '03-Feb-2026', '12/Feb/26', '12 Feb 26'
+    if re.match(rf"^\d{{1,2}}[\s\-/.]{months}[\s\-/.](?:\d{{2}}|\d{{4}})(?:\s.*)?$", v, re.IGNORECASE):
+        return True
+
+    # 2. Month-Day-Year or Month-Year e.g. 'Feb-12-26', 'Feb 2026'
+    if re.match(rf"^{months}[\s\-/.](?:\d{{1,2}}[\s\-/.])?(?:\d{{2}}|\d{{4}})(?:\s.*)?$", v, re.IGNORECASE):
+        return True
+
+    # 3. Numeric dates e.g. '01.05.2026', '12-02-26', '21/01/2026', '01.05.26'
+    if re.match(r"^\d{1,2}[-/. ]\d{1,2}[-/. ](?:\d{2}|\d{4})(?:\s.*)?$", v):
+        return True
+
+    # 4. ISO date format e.g. '2026-02-12', '2026/05/01'
+    if re.match(r"^\d{4}[-/. ]\d{1,2}[-/. ]\d{1,2}(?:\s.*)?$", v):
+        return True
+
+    return False
 
 
 def normalize_name(first, last) -> str:
@@ -97,6 +209,26 @@ def normalize_initial_name(first, last) -> str:
 
     l = re.sub(r"\s+", " ", str(last).strip().lower())
     return f"{initial} {l}".strip()
+
+
+def normalize_full_name(full_name) -> str:
+    """Normalizes an 'owner_name' string into 'first_word_only lastname' for matching."""
+    if pd.isna(full_name) or not str(full_name).strip():
+        return ""
+    val = str(full_name).strip()
+    val = re.sub(r"\(.*?\)", "", val).strip()
+    if "," in val:
+        parts = val.split(",", 1)
+        last, first = parts[0].strip(), parts[1].strip()
+    else:
+        parts = val.split()
+        if len(parts) == 0:
+            return ""
+        if len(parts) == 1:
+            return re.sub(r"[^\w-]", "", parts[0]).lower()
+        first = parts[0]
+        last = " ".join(parts[1:])
+    return normalize_name(first, last)
 
 
 def parse_site_number_to_int(val) -> int | None:
@@ -190,9 +322,9 @@ def parse_allocation(val) -> float | None:
 def load_csv_safely(file_path: str) -> pd.DataFrame:
     """Reads CSV trying UTF-8 first, falling back to Latin-1."""
     try:
-        return client.read_csv(file_path, encoding="utf-8-sig")
+        return client.read_csv(file_path, encoding="utf-8-sig", low_memory=False)
     except UnicodeDecodeError:
-        return client.read_csv(file_path, encoding="latin1")
+        return client.read_csv(file_path, encoding="latin1", low_memory=False)
 
 
 def find_latest_timesheet(directory: str, pattern: str) -> str:
@@ -214,11 +346,7 @@ def find_latest_timesheet(directory: str, pattern: str) -> str:
 
 
 def derive_password_from_email(email) -> str:
-    """
-    Temporary password fill: the part of a person's email before the '@'
-    (e.g. "tcox@rjmcleods.co.uk" -> "tcox"). Blank if no email was matched
-    for this person (e.g. "Not In Mitti").
-    """
+    """Temporary password fill: the part of a person's email before the '@'."""
     if email is None or (isinstance(email, float) and pd.isna(email)):
         return ""
     email_str = str(email).strip()
@@ -231,17 +359,7 @@ def build_user_site_groups_table():
     """
     Builds gld_user_site_groups.csv: one row per (site, user, group)
     combination. Sourced from each site's OWN 'Members' roster in
-    gld_sites.csv - NOT the monthly timesheet - matched to gld_users.csv
-    by name (with a gld_site_members.csv ID-based fallback for any name
-    that didn't match cleanly), then left-joined to gld_groups.csv.
-
-    This is a genuinely different question from rp2_site_user_data.csv
-    above: "who's actually on this site's roster and what groups do they
-    belong to" vs "what % of a person's time is allocated to which site
-    this month". Kept as a separate output on purpose.
-
-    A person in more than one group produces more than one row here -
-    same behaviour as the groups join added to rp2_site_user_data.csv.
+    gld_sites.csv - NOT the monthly timesheet.
     """
     print("\n" + "=" * 80)
     print("BUILDING gld_user_site_groups.csv (site roster + groups)")
@@ -350,9 +468,14 @@ def build_user_site_groups_table():
     df_master_usg['reporting_group'] = df_master_usg['reporting_group'].fillna('No Reporting Group')
     df_master_usg['group_member_status'] = df_master_usg['group_member_status'].fillna('unknown')
 
+    # 6b. Job Type from the site number embedded in the GLD site name
+    df_master_usg['job_type'] = df_master_usg['site_name'].apply(
+        lambda n: map_job_type(extract_site_key_from_gld(n))
+    )
+
     # 7. Final Reordering and Output
     final_cols = [
-        'site_id', 'site_name', 'site_area',
+        'site_id', 'site_name', 'site_area', 'job_type',
         'user_id', 'user_name', 'firstname', 'lastname', 'email', 'user_active', 'user_seat_type',
         'group_name', 'reporting_group', 'group_member_status'
     ]
@@ -362,6 +485,12 @@ def build_user_site_groups_table():
 
     client.write_csv(df_master_usg, GLD_USER_SITE_GROUPS_OUTPUT, index=False)
     print(f"   -> Deployed gld_user_site_groups.csv: {len(df_master_usg):,} rows to {GLD_USER_SITE_GROUPS_OUTPUT}")
+
+    unmapped_sites = df_master_usg.loc[df_master_usg['job_type'] == UNMAPPED_JOB_TYPE, 'site_name'].dropna().unique()
+    if len(unmapped_sites) > 0:
+        print(f"   ⚠️ {len(unmapped_sites)} site(s) with no Job Type mapping:")
+        for s in sorted(unmapped_sites):
+            print(f"      - {s}")
 
 
 def run_pipeline():
@@ -547,23 +676,110 @@ def run_pipeline():
 
     print(f"   -> Found {len(w3w_exact_lookup)} exact contract w3w entries across {len(all_rjm_dfs)} sheet(s).")
 
-    # Diagnostic check for site 2354
-    diag_rows = df_rjm_all[df_rjm_all["_contract_key"] == 2354]
-    if len(diag_rows) == 0:
-        diag_rows = df_rjm_all[df_rjm_all["_contract_key"].astype(str).str.startswith("2354")]
+    # =========================================================================
+    # STEP 2c: Load GLD Inspections & Calculate User Primary Sites
+    # =========================================================================
+    primary_site_by_id = {}
+    primary_site_by_name = {}
+    primary_site_by_simple_name = {}
 
-    print("\n   --- Diagnostic Check for Site 2354 ---")
-    if not diag_rows.empty:
-        for _, row_d in diag_rows.iterrows():
-            print(f"   Sheet: '{row_d['_sheet']}' | Raw Contract: '{row_d['_raw_contract']}' | Parsed: {row_d['_contract_key']} | w3w: '{row_d['Location in w3w']}'")
+    if client.exists(GLD_INSPECTIONS_CSV):
+        print(f"\n2c. Loading GLD inspections reference: {GLD_INSPECTIONS_CSV.rsplit('/', 1)[-1]} ...")
+        df_insp = load_csv_safely(GLD_INSPECTIONS_CSV)
+        df_insp.columns = df_insp.columns.str.strip()
+
+        insp_cols = [c for c in ["owner_id", "owner_name", "site_name"] if c in df_insp.columns]
+        if "site_name" in df_insp.columns:
+            df_insp_sub = df_insp[insp_cols].dropna(subset=["site_name"]).copy()
+            df_insp_sub["site_name"] = df_insp_sub["site_name"].astype(str).str.strip()
+
+            initial_count = len(df_insp_sub)
+
+            # DISMISS dates entered into site_name (e.g., '12-Feb-26', '01.05.2026', '21-Jan-26')
+            df_insp_sub = df_insp_sub[
+                (df_insp_sub["site_name"] != "")
+                & (df_insp_sub["site_name"].str.lower() != "nan")
+                & (df_insp_sub["site_name"].str.lower() != "none")
+                & (~df_insp_sub["site_name"].apply(is_date_like))
+            ]
+
+            dismissed_dates = initial_count - len(df_insp_sub)
+            if dismissed_dates > 0:
+                print(f"   -> Dismissed {dismissed_dates:,} inspection rows where site_name was a date.")
+
+            # 1. Primary site by owner_id
+            if "owner_id" in df_insp_sub.columns:
+                df_insp_id = df_insp_sub.dropna(subset=["owner_id"]).copy()
+                df_insp_id["_clean_oid"] = df_insp_id["owner_id"].apply(clean_id_str)
+                df_insp_id = df_insp_id[df_insp_id["_clean_oid"] != ""]
+
+                if not df_insp_id.empty:
+                    id_counts = (
+                        df_insp_id.groupby(["_clean_oid", "site_name"])
+                        .size()
+                        .reset_index(name="count")
+                    )
+                    id_top = (
+                        id_counts.sort_values(
+                            by=["_clean_oid", "count", "site_name"],
+                            ascending=[True, False, True],
+                        ).drop_duplicates(subset=["_clean_oid"], keep="first")
+                    )
+                    primary_site_by_id = dict(zip(id_top["_clean_oid"], id_top["site_name"]))
+
+            # 2. Primary site by owner_name
+            if "owner_name" in df_insp_sub.columns:
+                df_insp_name = df_insp_sub.dropna(subset=["owner_name"]).copy()
+                df_insp_name["_norm_name"] = df_insp_name["owner_name"].apply(normalize_full_name)
+                df_insp_name["_simple_name"] = df_insp_name["owner_name"].apply(
+                    lambda x: " ".join(re.sub(r"[^\w\s]", "", str(x)).lower().split())
+                )
+
+                # Top site by normalized name
+                name_sub = df_insp_name[df_insp_name["_norm_name"] != ""]
+                if not name_sub.empty:
+                    name_counts = (
+                        name_sub.groupby(["_norm_name", "site_name"])
+                        .size()
+                        .reset_index(name="count")
+                    )
+                    name_top = (
+                        name_counts.sort_values(
+                            by=["_norm_name", "count", "site_name"],
+                            ascending=[True, False, True],
+                        ).drop_duplicates(subset=["_norm_name"], keep="first")
+                    )
+                    primary_site_by_name = dict(zip(name_top["_norm_name"], name_top["site_name"]))
+
+                # Top site by simple alphanumeric name
+                simple_sub = df_insp_name[df_insp_name["_simple_name"] != ""]
+                if not simple_sub.empty:
+                    simple_counts = (
+                        simple_sub.groupby(["_simple_name", "site_name"])
+                        .size()
+                        .reset_index(name="count")
+                    )
+                    simple_top = (
+                        simple_counts.sort_values(
+                            by=["_simple_name", "count", "site_name"],
+                            ascending=[True, False, True],
+                        ).drop_duplicates(subset=["_simple_name"], keep="first")
+                    )
+                    primary_site_by_simple_name = dict(zip(simple_top["_simple_name"], simple_top["site_name"]))
+
+            print(
+                f"   -> Computed primary sites for {len(primary_site_by_id):,} users by ID and "
+                f"{len(primary_site_by_name):,} users by name."
+            )
+        else:
+            print("   ⚠️ 'site_name' column not found in gld_inspections.csv - skipping primary site computation")
     else:
-        print("   [Warning] Number 2354 was not found in any sheet of RJ McLeod Site list.xlsx!")
-    print("   ----------------------------------------\n")
+        print(f"   ⚠️ {GLD_INSPECTIONS_CSV.rsplit('/', 1)[-1]} not found - skipping primary site computation")
 
     # =========================================================================
     # STEP 3: Load and prepare GLD users lookup dictionaries
     # =========================================================================
-    print(f"3. Loading GLD users reference: {GLD_USERS_CSV.rsplit('/', 1)[-1]} ...")
+    print(f"\n3. Loading GLD users reference: {GLD_USERS_CSV.rsplit('/', 1)[-1]} ...")
     df_gld_users = load_csv_safely(GLD_USERS_CSV)
     df_gld_users.columns = df_gld_users.columns.str.strip()
 
@@ -622,6 +838,9 @@ def run_pipeline():
         right_on="_site_key",
         how="left",
     ).drop(columns=["_site_key"])
+
+    # 4a-ii. Job Type from Contract Site Number
+    df_merged["Job Type"] = df_merged["Contract Site Number"].apply(map_job_type)
 
     # 4b. Match w3w using 2-tier matching (Exact -> Base 4-digit)
     w3w_matches = []
@@ -691,14 +910,70 @@ def run_pipeline():
     df_merged["Last Seen At"] = matched_last_seens
     df_merged["_match_type"] = match_types
 
-    # 4d. Join Groups (gld_groups.csv) via User ID -> user_id
-    # NOTE: a person can belong to more than one group (confirmed by
-    # RP4 GLD to TLB.py's own handling of this same file) - a plain left
-    # join means someone in two groups gets two output rows, multiplying
-    # whatever site-assignment rows they already had. Matches the same
-    # behaviour already established for gld_groups.csv elsewhere in this
-    # pipeline, not a new dedup rule invented here.
-    print(f"\n4d. Loading GLD groups reference: {GLD_GROUPS_CSV.rsplit('/', 1)[-1]} ...")
+    # 4d. Determine Primary Site from Inspections (ID -> Name -> GLD Site Name fallback)
+    primary_sites = []
+    primary_sources = []
+
+    for _, row in df_merged.iterrows():
+        uid = clean_id_str(row.get("User ID"))
+        first = row.get("First Name")
+        last = row.get("Surname")
+
+        ps = ""
+        source = ""
+
+        # 1. Match by User ID first (if valid and not 'Not In Mitti')
+        if uid and uid.lower() != "not in mitti":
+            ps = primary_site_by_id.get(uid, "")
+            if ps and not is_date_like(ps):
+                source = "Inspections (ID)"
+            else:
+                ps = ""
+
+        # 2. Fallback to Name matching if no primary site found by ID
+        if not ps:
+            norm_n = normalize_name(first, last)
+            if norm_n:
+                ps = primary_site_by_name.get(norm_n, "")
+
+            if not ps:
+                swapped_norm = normalize_name(last, first)
+                if swapped_norm:
+                    ps = primary_site_by_name.get(swapped_norm, "")
+
+            if not ps:
+                simple_n = " ".join(re.sub(r"[^\w\s]", "", f"{first} {last}").lower().split())
+                if simple_n:
+                    ps = primary_site_by_simple_name.get(simple_n, "")
+
+            if ps and not is_date_like(ps):
+                source = "Inspections (Name)"
+            else:
+                ps = ""
+
+        # 3. Fallback: If no inspections complete or site was a date, use GLD Site Name
+        if not ps:
+            gld_site = clean_str(row.get("GLD Site Name"))
+            if gld_site and not is_date_like(gld_site):
+                ps = gld_site
+                source = "Fallback (GLD Site Name)"
+            else:
+                site_fallback = clean_str(row.get("Site Name"))
+                if site_fallback and not is_date_like(site_fallback):
+                    ps = site_fallback
+                    source = "Fallback (Timesheet Site Name)"
+                else:
+                    ps = ""
+                    source = "Unassigned"
+
+        primary_sites.append(ps if ps else "")
+        primary_sources.append(source)
+
+    df_merged["Primary Site"] = primary_sites
+    df_merged["_primary_site_source"] = primary_sources
+
+    # 4e. Join Groups (gld_groups.csv) via User ID -> user_id
+    print(f"\n4e. Loading GLD groups reference: {GLD_GROUPS_CSV.rsplit('/', 1)[-1]} ...")
     df_gld_groups = load_csv_safely(GLD_GROUPS_CSV)
     df_gld_groups.columns = df_gld_groups.columns.str.strip()
 
@@ -719,7 +994,7 @@ def run_pipeline():
 
     print(f"   -> Joined groups: {len(groups_subset):,} group membership rows available to match")
 
-    # 4e. Generate Access levels + password (temp fill: email prefix before '@')
+    # 4f. Generate Access levels + password (temp fill: email prefix before '@')
     access_list = []
     password_list = []
 
@@ -739,7 +1014,7 @@ def run_pipeline():
     df_merged["Access"] = access_list
     df_merged["Password"] = password_list
 
-    # Final column ordering
+    # Final column ordering (Includes 'Primary Site' and 'Job Type')
     columns_order = [
         "First Name",
         "Surname",
@@ -752,6 +1027,8 @@ def run_pipeline():
         "Contract Site Number",
         "Site Name",
         "GLD Site Name",
+        "Job Type",
+        "Primary Site",
         "Site Area",
         "Location in w3w",
         "GroupName",
@@ -773,24 +1050,41 @@ def run_pipeline():
 
     total_rows = len(df_final)
     matched_sites = df_final["GLD Site Name"].notna().sum()
+    matched_primary_sites = (df_final["Primary Site"].astype(str).str.strip() != "").sum()
     matched_w3w = (df_final["Location in w3w"].str.strip() != "").sum()
     matched_users = (df_final["User ID"] != "Not In Mitti").sum()
     blank_passwords = (df_final["Password"] == "").sum()
     match_counts = df_merged["_match_type"].value_counts().to_dict()
+    source_counts = df_merged["_primary_site_source"].value_counts().to_dict()
     unrestricted_count = (df_final["Access"] == "Un_Restricted").sum()
+    mapped_job_types = (df_final["Job Type"] != UNMAPPED_JOB_TYPE).sum()
 
     print("\n--- Summary ---")
-    print(f"Total rows:                 {total_rows}")
-    print(f"Un_Restricted rows:         {unrestricted_count} / {total_rows}")
-    print(f"Matched with GLD Sites:     {matched_sites} / {total_rows}")
-    print(f"Matched with w3w Location:  {matched_w3w} / {total_rows}")
-    print(f"Matched with GLD Users:     {matched_users} / {total_rows}")
-    print(f"Blank Password (no email):  {blank_passwords} / {total_rows}")
-    print(f"   -> Exact (Normal):       {match_counts.get('Exact', 0)}")
-    print(f"   -> Exact (Swapped):      {match_counts.get('Exact (Swapped)', 0)}")
-    print(f"   -> Initial (Normal):     {match_counts.get('Initial', 0)}")
-    print(f"   -> Initial (Swapped):    {match_counts.get('Initial (Swapped)', 0)}")
-    print(f"   -> Unmatched / Not Found: {match_counts.get('Unmatched', 0)}")
+    print(f"Total rows:                     {total_rows}")
+    print(f"Un_Restricted rows:             {unrestricted_count} / {total_rows}")
+    print(f"Matched with GLD Sites:         {matched_sites} / {total_rows}")
+    print(f"Mapped to a Job Type:           {mapped_job_types} / {total_rows}")
+    print(f"Assigned Primary Site:          {matched_primary_sites} / {total_rows}")
+    print(f"   -> From Inspections (ID):    {source_counts.get('Inspections (ID)', 0)}")
+    print(f"   -> From Inspections (Name):  {source_counts.get('Inspections (Name)', 0)}")
+    print(f"   -> Fallback (GLD Site Name): {source_counts.get('Fallback (GLD Site Name)', 0)}")
+    if source_counts.get('Fallback (Timesheet Site Name)', 0) > 0:
+        print(f"   -> Fallback (Timesheet):     {source_counts.get('Fallback (Timesheet Site Name)', 0)}")
+    print(f"Matched with w3w Location:      {matched_w3w} / {total_rows}")
+    print(f"Matched with GLD Users:         {matched_users} / {total_rows}")
+    print(f"Blank Password (no email):      {blank_passwords} / {total_rows}")
+    print(f"   -> Exact (Normal):           {match_counts.get('Exact', 0)}")
+    print(f"   -> Exact (Swapped):          {match_counts.get('Exact (Swapped)', 0)}")
+    print(f"   -> Initial (Normal):         {match_counts.get('Initial', 0)}")
+    print(f"   -> Initial (Swapped):        {match_counts.get('Initial (Swapped)', 0)}")
+    print(f"   -> Unmatched / Not Found:    {match_counts.get('Unmatched', 0)}")
+
+    if mapped_job_types < total_rows:
+        unmapped = df_final[df_final["Job Type"] == UNMAPPED_JOB_TYPE][
+            ["Contract Site Number", "Site Name"]
+        ].drop_duplicates()
+        print(f"\nSites with no Job Type mapping ({len(unmapped)}) - add them to JOB_TYPE_MAP:")
+        print(unmapped.to_string(index=False))
 
     if match_counts.get("Unmatched", 0) > 0:
         unmatched_users = df_merged[df_merged["_match_type"] == "Unmatched"][

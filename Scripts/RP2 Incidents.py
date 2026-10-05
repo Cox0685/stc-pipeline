@@ -176,6 +176,17 @@ category_value_mapping = {
 }
 
 # ============================================================================
+# TASK STATUS VALUE MAPPING
+# ============================================================================
+
+status_value_mapping = {
+    "450484b156cd47849b49a3cf97d0c0ad": "Resolved",
+    "450484b1-56cd-4784-9b49-a3cf97d0c0ad": "Resolved",
+    "547ed6465e344732bb54a199d304368a": "Open",
+    "547ed646-5e34-4732-bb54-a199d304368a": "Open"
+}
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
@@ -192,6 +203,22 @@ def lookup_question_text(q_id_raw):
         return question_mapping[no_hyphens]
         
     return None
+
+def lookup_status_text(status_id_raw):
+    """
+    Looks up readable status name using raw ID, stripped ID, or normalized ID without hyphens.
+    """
+    clean_id = str(status_id_raw).strip()
+    if not clean_id:
+        return ''
+    if clean_id in status_value_mapping:
+        return status_value_mapping[clean_id]
+    
+    no_hyphens = clean_id.replace("-", "").lower()
+    if no_hyphens in status_value_mapping:
+        return status_value_mapping[no_hyphens]
+        
+    return clean_id
 
 def get_answer_for_question(row, q_idx, all_columns):
     """
@@ -466,6 +493,10 @@ def main():
             else:
                 final_df[col] = final_df[col].fillna('')
 
+        # Apply Task Status value mapping
+        if 'task_status_id' in final_df.columns:
+            final_df['task_status_id'] = final_df['task_status_id'].apply(lookup_status_text)
+
         # Apply Category value mapping
         if 'Category' in final_df.columns:
             final_df['Category'] = final_df['Category'].apply(
@@ -487,7 +518,7 @@ def main():
 
         print("\n📋 Sample of Output (First 5 rows):")
         display_cols = [
-            c for c in ['task_unique_id', 'task_occurred_at', 'task_created_at', 'Category', 'Details', 'Reporter', 'Lost Time'] 
+            c for c in ['task_unique_id', 'task_status_id', 'task_occurred_at', 'task_created_at', 'Category', 'Details', 'Reporter', 'Lost Time'] 
             if c in final_df.columns
         ]
         print(final_df[display_cols].head(5).to_string(index=False))

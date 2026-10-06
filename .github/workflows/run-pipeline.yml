@@ -49,14 +49,17 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    # Job-level safety net: caps the ENTIRE run, all 26 steps combined.
+    # Job-level safety net: caps the ENTIRE run, all steps combined. 330 min
+    # because the weekly (Friday) run pulls HeadsUp_Users + User_Groups in
+    # Stage 1 (about 50 min + 2.5 hours) before the other stages even start.
+    # GitHub's own hard maximum for a hosted job is 360.
     # GitHub Actions' own default if this isn't set is 360 minutes (6
     # hours) per job, and NO limit at all on an individual step - which is
     # exactly what let a genuinely stuck thread inside STC API IN.py sit
     # unbounded with nothing stopping it. This is the workflow-level
     # equivalent of the subprocess-kill timeout already built into the
     # local STC Pipeline Runner.py.
-    timeout-minutes: 240
+    timeout-minutes: 330
     env:
       # Forces Python's stdout to flush immediately on every print(),
       # rather than block-buffering (the default when not attached to a
@@ -78,17 +81,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r infra/requirements.txt
 
-      - name: Decide whether this run includes User_Groups
+      - name: Decide whether this run is the weekly full pull
         id: groups_check
         run: |
           if [ "${{ github.event.schedule }}" == "0 2 * * 5" ] || [ "${{ github.event.inputs.include_user_groups }}" == "true" ]; then
             echo "include_groups=true" >> "$GITHUB_OUTPUT"
-            echo "stage1_timeout=180" >> "$GITHUB_OUTPUT"
-            echo "Including User_Groups this run - Stage 1 timeout set to 180 minutes"
+            echo "stage1_timeout=240" >> "$GITHUB_OUTPUT"
+            echo "Weekly full pull (HeadsUp, Groups, Sites, Users, User_Groups included) - Stage 1 timeout set to 240 minutes"
           else
             echo "include_groups=false" >> "$GITHUB_OUTPUT"
-            echo "stage1_timeout=45" >> "$GITHUB_OUTPUT"
-            echo "Skipping User_Groups this run - Stage 1 timeout set to 45 minutes"
+            echo "stage1_timeout=60" >> "$GITHUB_OUTPUT"
+            echo "Daily run - weekly-only endpoints skipped - Stage 1 timeout set to 60 minutes"
           fi
 
       # ======================================================================
@@ -102,15 +105,18 @@ jobs:
         # specifically the step where a stuck thread inside a
         # ThreadPoolExecutor's shutdown has been observed hanging with no
         # further output at all, well past STC API IN.py's own internal
-        # future.result() timeouts. Dynamic: 45 min on a normal day (no
-        # User_Groups - that alone was seen taking 2.5+ hours for the full
-        # user count), 180 min on the day it's included.
+        # future.result() timeouts. Dynamic: 60 min on a normal day, 240 min on
+        # the weekly full-pull day. Weekly-only endpoints (slow-changing
+        # reference data): HeadsUp_List/Users (about 50 min alone), Groups_List/
+        # Users, Sites_List, Site_Members, Users_Feed, User_Groups (2.5+ hours
+        # at the current user count), Companies_*. Their TNS files simply stay
+        # as last pulled on the other days.
         timeout-minutes: ${{ fromJSON(steps.groups_check.outputs.stage1_timeout) }}
         env:
           ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
           ADLS_FILESYSTEM: stc-data
           SAFETYCULTURE_API_KEY: ${{ secrets.SAFETYCULTURE_API_KEY }}
-          MISSION_ENABLED_OVERRIDES: "${{ steps.groups_check.outputs.include_groups == 'true' && '{}' || '{\"User_Groups\": false}' }}"
+          MISSION_ENABLED_OVERRIDES: "${{ steps.groups_check.outputs.include_groups == 'true' && '{}' || '{\"HeadsUp_List\": false, \"HeadsUp_Users\": false, \"Companies_List\": false, \"Companies_Detail\": false, \"Companies_Users\": false, \"Sites_List\": false, \"Site_Members\": false, \"Groups_List\": false, \"Groups_Users\": false, \"Users_Feed\": false, \"User_Groups\": false}' }}"
         run: python "STC API IN.py"
 
       - name: Stage 2 - Flatten JSON (TNS -> BNZ)

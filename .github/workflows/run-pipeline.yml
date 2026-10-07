@@ -339,7 +339,12 @@ jobs:
       - name: Stage 28 - RP4 Waste Data (REP)
         # !cancelled() so this still runs if Stage 26/27 failed (e.g. no
         # monthly timesheet uploaded yet) - it doesn't depend on either.
+        # continue-on-error: this report is non-essential - if nobody's
+        # dropped this month's "*Scope 3*.xlsx" into TNS/static source
+        # files/ yet, that's a missing manual upload, not a pipeline bug,
+        # and shouldn't fail the whole run or block Stage 29's publish.
         if: ${{ !cancelled() }}
+        continue-on-error: true
         working-directory: Scripts
         env:
           ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
@@ -347,3 +352,42 @@ jobs:
         # Reads the newest "*Scope 3*.xlsx" in TNS/static source files/ - a
         # manual monthly upload, same as the staff timesheet.
         run: python "RP4 Waste Data.py"
+
+
+      # ======================================================================
+      # PUBLISH: TABLES (Azure) -> SHEQ-Portal repo (assets/tables) -> Netlify
+      # ======================================================================
+
+      - name: Stage 29 - Publish tables to the SHEQ Portal repo
+        # !cancelled() so tables built by earlier stages still go out even if
+        # a later optional stage (e.g. missing monthly upload) failed. If the
+        # pipeline broke earlier than the tables, nothing in TABLES/ has
+        # changed, so this step finds no diff and pushes nothing.
+        if: ${{ !cancelled() }}
+        env:
+          ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
+          ADLS_FILESYSTEM: stc-data
+          PORTAL_PAT: ${{ secrets.PORTAL_PAT }}
+        run: |
+          if [ -z "$PORTAL_PAT" ]; then
+            echo "PORTAL_PAT secret is not set - skipping publish to the portal (see setup notes)."
+            exit 0
+          fi
+
+          python "Scripts/Publish Tables.py" "$RUNNER_TEMP/tables"
+
+          git clone --depth 1 "https://x-access-token:${PORTAL_PAT}@github.com/Cox0685/SHEQ-Portal.git" "$RUNNER_TEMP/portal"
+          mkdir -p "$RUNNER_TEMP/portal/assets/tables"
+          cp -f "$RUNNER_TEMP/tables/"* "$RUNNER_TEMP/portal/assets/tables/"
+
+          cd "$RUNNER_TEMP/portal"
+          git add assets/tables
+          if git diff --cached --quiet; then
+            echo "Tables unchanged - nothing to publish."
+            exit 0
+          fi
+          git config user.name "stc-pipeline"
+          git config user.email "stc-pipeline@users.noreply.github.com"
+          git commit -m "Data refresh $(date -u +%Y-%m-%d) (stc-pipeline)"
+          git pull --rebase origin main
+          git push origin HEAD:main

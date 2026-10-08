@@ -326,6 +326,11 @@ jobs:
         run: python "RP4 Site and User Data.py"
 
       - name: Stage 27 - RP2 Samsara User Data (REP)
+        # continue-on-error: this report is non-essential - if nobody's
+        # dropped a "Tick List Week N.xlsx" into REP/custom reports/driver
+        # data/ yet, that's a missing manual upload, not a pipeline bug,
+        # and shouldn't fail the whole run.
+        continue-on-error: true
         working-directory: Scripts
         env:
           ADLS_CONNECTION_STRING: ${{ secrets.ADLS_CONNECTION_STRING }}
